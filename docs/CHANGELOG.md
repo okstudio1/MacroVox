@@ -10,6 +10,14 @@
 
 - **Version synced to 1.0.8 across manifests.** `Cargo.toml`, `Cargo.lock`, and `package-lock.json` lagged at 1.0.7 while `package.json` and `tauri.conf.json` (the authoritative updater version) were already 1.0.8 for the published release. All four now agree.
 
+### Linux
+
+- **Auto-paste now works on Wayland.** Previously auto-paste was disabled entirely under Wayland (`enigo` can't synthesise input there), leaving Wayland users to paste manually, a regression versus X11. MacroVox now falls back to a Wayland-native injector, preferring `wtype` (daemonless) and falling back to `ydotool`, detected on `$PATH` at paste time. When one is installed the "Auto-paste on stop" toggle is enabled and Ctrl+V is injected as on X11; when neither is present, the toggle is disabled with an inline note to install one (the transcript still copies to the clipboard). Exposed to the renderer via a new `auto_paste_available` field on `platform_info`. See `src-tauri/src/platform.rs` and `dictation_auto_paste` in `commands.rs`.
+
+### Internal
+
+- **Perf instrumentation for the latencies that matter.** Added `info`-level `[perf] …` probes so perceived-latency claims rest on measured numbers, not folklore: `audio_start` logs time-to-first-capture broken into config/build/play stages; `dictation_auto_paste` logs end-to-end keystroke-inject latency; and a new `perf_mark` command (called from `dictation.tsx` after first paint) logs time-to-first-paint relative to process start. Run with `RUST_LOG=info` to see them. See the "Perf instrumentation" section in `src-tauri/ARCHITECTURE.md`.
+
 ### Fixes
 
 - **Smart number formatting now recognizes item labels.** In `Smart` number mode, numbers that label or identify a specific item (e.g. "survey 3", "step 2", "question 9") now render as digits instead of words. Previously the AI-cleanup prompt treated these as small standalone counts and spelled them out ("surveys three and four"). The prompt also propagates digit formatting across a list when the noun is implied, so "I updated surveys 3 and 4; still waiting on 7, 5, and 6" formats consistently. Genuine colloquial counts ("twenty-one people", "three of them") still spell out. Applies to the `Smart` mode only and requires AI cleanup. See `src/renderer/hooks/usePostProcessing.ts`.

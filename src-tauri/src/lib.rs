@@ -165,6 +165,7 @@ pub fn run() {
             settings_open_window,
             app_set_minimize_to_tray,
             platform_info,
+            perf_mark,
             // Theme, settings, hotkey
             theme_broadcast,
             settings_broadcast,

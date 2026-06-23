@@ -91,7 +91,7 @@ MacroVox is a four-tier system: a native desktop client, a serverless proxy laye
 | Shell | Tauri 2 | Native binaries, WebView-based UI without bundling Chromium, direct Rust backend, signed installer support. |
 | Audio capture | `cpal` (WASAPI on Windows, ALSA/PulseAudio on Linux) | Cross-platform, low-overhead, callback-driven; no Web Audio jitter. |
 | STT transport | `tokio-tungstenite` (WebSocket) | Persistent connection to Deepgram, single TLS handshake amortised across many utterances. |
-| Key injection | `enigo` | Synthesises native key events; works on Windows and X11. Wayland fallback is documented (see §6). |
+| Key injection | `enigo` (X11/Windows/macOS) + `wtype`/`ydotool` (Wayland) | Synthesises native key events; `enigo` covers Windows, macOS, and X11, with a `wtype`/`ydotool` fallback on Wayland (see §6). |
 | Frontend | React + Vite + Tailwind | Fast HMR for theme/UI work; small bundles into the WebView. |
 | Auth | Supabase JS SDK in the renderer | Renderer holds the session; the Rust backend reads the bearer token via IPC for its own authenticated calls. |
 | Billing | Stripe + Supabase Edge Functions | Subscription state lives next to user identity; webhook is the single source of truth. |
@@ -209,7 +209,7 @@ Linux is supported in beta with `.deb`, `.rpm`, and AppImage bundles produced by
 The display server matters:
 
 - **X11.** Full parity with Windows — global hotkey, auto-paste, and clipboard all behave identically.
-- **Wayland.** Partial. Global hotkeys depend on the compositor's XDG portal and may not register on some compositors. `enigo`-based auto-paste is unreliable on Wayland and is therefore disabled when MacroVox detects `WAYLAND_DISPLAY` at startup (the detection lives in `src-tauri/src/platform.rs`); the user is told in Settings that they need to paste manually or launch from an X11 session.
+- **Wayland.** Partial. Global hotkeys depend on the compositor's XDG portal and may not register on some compositors. `enigo` cannot synthesise input under Wayland, so auto-paste falls back to a Wayland-native tool — `wtype` (preferred; daemonless) or `ydotool` — detected on `$PATH` at call time (`src-tauri/src/platform.rs`). When one is present, auto-paste works; when neither is installed, MacroVox reports `auto_paste_available: false` via `platform_info` and Settings disables the toggle with an inline note to install a tool or paste the (already-copied) transcript manually.
 
 The Linux microphone picker filters out ALSA's virtual aliases (`hw:`, `plughw:`, `dmix:`, `surround*:`, `iec958:`, `hdmi:`, monitor taps) so the user sees only meaningful devices. The selected device is persisted across restarts.
 
@@ -281,7 +281,7 @@ In approximate priority order:
 1. **macOS port.** CoreAudio backend in cpal, notarised distribution, accessibility-permission flow.
 2. **Streaming cleanup.** Replace the post-utterance batch Claude call with a streamed pass, so the cleaned text arrives concurrently with the raw paste rather than after it.
 3. **OAuth providers.** Google and Facebook in Supabase Auth.
-4. **Wayland parity.** Track XDG portal global-hotkey support upstream; revisit `enigo`'s Wayland story when the underlying portal is stable.
+4. **Wayland parity.** Auto-paste now has a `wtype`/`ydotool` fallback; the remaining gap is global hotkeys, which depend on XDG portal support — track that upstream and revisit when the portal is stable.
 5. **Expanded language coverage.** Currently 20 languages via Deepgram Nova-3; the limit is upstream model availability, not client work.
 
 ---

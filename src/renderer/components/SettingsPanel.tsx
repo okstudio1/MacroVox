@@ -614,12 +614,12 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 { label: 'Auto-copy on stop', desc: 'Instantly copy transcript to clipboard when you stop recording', value: autoCopyOnStop, onChange: handleAutoCopyToggle, disabled: false },
                 {
                   label: 'Auto-paste on stop',
-                  desc: platformInfo?.is_wayland
-                    ? 'Unavailable on Wayland — key injection is blocked. The transcript still copies to your clipboard; paste it with Ctrl+V.'
+                  desc: platformInfo && !platformInfo.auto_paste_available
+                    ? 'Unavailable on Wayland — install `wtype` or `ydotool` to enable auto-paste. The transcript still copies to your clipboard; paste it with Ctrl+V.'
                     : 'Paste into the app you were typing in — text lands where your cursor was',
-                  value: platformInfo?.is_wayland ? false : autoPasteEnabled,
+                  value: platformInfo && !platformInfo.auto_paste_available ? false : autoPasteEnabled,
                   onChange: handleAutoPasteToggle,
-                  disabled: !!platformInfo?.is_wayland,
+                  disabled: !!(platformInfo && !platformInfo.auto_paste_available),
                 },
                 { label: 'Clear on new recording', desc: 'Delete previous transcript when starting a new one', value: clearOnNewRecording, onChange: handleClearOnNewToggle, disabled: false },
               ].map(({ label, desc, value, onChange, disabled }) => (
