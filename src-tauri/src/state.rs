@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::deepgram_ws::DgSender;
 
@@ -116,6 +117,12 @@ pub struct AppState {
 
     /// The in-flight record-only session, joined by `voice_buffer_record_stop`.
     pub active_recording: Mutex<Option<crate::recorder::ActiveRecording>>,
+
+    // ── Perf instrumentation ──────────────────────────────────────────────────
+    /// Wall-clock instant captured when `AppState` is constructed, very early in
+    /// `run()`. Used as the zero point for the `perf_mark` command so the
+    /// renderer can report time-to-first-paint relative to process start.
+    pub started_at: Instant,
 }
 
 impl Default for AppState {
@@ -141,6 +148,8 @@ impl Default for AppState {
             voice_buffer_max_size: Mutex::new(100 * 1024 * 1024), // 100 MB
             capture_tap: Arc::new(Mutex::new(None)),
             active_recording: Mutex::new(None),
+
+            started_at: Instant::now(),
         }
     }
 }

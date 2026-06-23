@@ -108,13 +108,17 @@ Returns `{ success: false, error: "local-stt feature not enabled" }` in default 
 | `dictation_set_always_on_top(value)` | `setDictationAlwaysOnTop(v)` | `OkResponse` |
 | `settings_open_window` | `openSettingsWindow()` | `OkResponse` |
 | `app_set_minimize_to_tray(value)` | `setMinimizeToTray(v)` | `OkResponse` |
-| `platform_info` | `getPlatformInfo()` | `PlatformInfo { os, is_wayland }` |
+| `platform_info` | `getPlatformInfo()` | `PlatformInfo { os, is_wayland, auto_paste_available }` |
+| `perf_mark(label)` | `perfMark(label)` | `OkResponse` (logs `[perf] {label}: {ms}ms` since process start) |
 
-`dictation_auto_paste` short-circuits with an error on Wayland — `enigo`
-lacks a reliable key-injection path there. The clipboard copy done upstream
-still succeeds, so the user can paste manually. The renderer reads
-`platform_info` on Settings mount and disables the "Auto-paste on stop"
-toggle with an inline explanation when `is_wayland` is true.
+`dictation_auto_paste` injects via `enigo` on Windows/macOS/Linux-X11. On
+Wayland `enigo` cannot synthesise input, so it falls back to `wtype` (or
+`ydotool`) when one is installed; if neither is present it returns an
+explanatory error and the user pastes the (already-copied) clipboard manually.
+The renderer reads `platform_info` on Settings mount and disables the
+"Auto-paste on stop" toggle only when `auto_paste_available` is false (Wayland
+with no paste tool). Both paths log end-to-end inject latency at `info` level
+(`[perf] auto_paste …`).
 
 ### Theme & settings broadcast
 
@@ -292,27 +296,55 @@ Model files: download `ggml-*.bin` from
 
 ---
 
-## Auto-paste subsystem (Phase 5 — enigo native SendInput)
+## Auto-paste subsystem (Phase 5 — enigo native SendInput; Wayland fallback)
 
 ```
 dictation_auto_paste()
-    ├── window.hide()          ← removes MacroVox from focus chain
-    └── thread::spawn:
-          sleep(50 ms)         ← OS re-focuses the previous app
-          Enigo::new()
-          ├── Key::Control  Direction::Press
-          ├── Key::Unicode('v')  Direction::Click
-          └── Key::Control  Direction::Release
-              └── → native SendInput(KEYEVENTF_KEYDOWN / KEYEVENTF_KEYUP)
+    ├── Linux + Wayland?
+    │     ├── wtype/ydotool installed → hide(); thread::spawn:
+    │     │     sleep(50 ms); wtype -M ctrl v -m ctrl   (or ydotool key 29:1 47:1 47:0 29:0)
+    │     └── neither installed → return err (clipboard already set; paste manually)
+    └── Windows / macOS / Linux-X11:
+          window.hide()            ← removes MacroVox from focus chain
+          thread::spawn:
+            sleep(50 ms)           ← OS re-focuses the previous app
+            Enigo::new()
+            ├── Key::Control  Direction::Press
+            ├── Key::Unicode('v')  Direction::Click
+            └── Key::Control  Direction::Release
+                └── → native key injection (Windows SendInput, macOS CGEvent, X11 XTEST)
 ```
 
 **Why 50 ms?** Windows needs a moment after `hide()` to return focus to the
 previously active window. 50 ms is empirically sufficient on Windows 10/11;
 the old PowerShell path used 180 ms to absorb subprocess start-up time on top
-of the same focus delay.
+of the same focus delay. The delay is unconditional — identical on every
+platform — so the `[perf] auto_paste …` log line (info level) sits at ~50 ms +
+the backend's own injection cost.
 
-**Dependency:** `enigo = "0.2"` in Cargo.toml.  No feature flags required;
-works on Windows, macOS, and Linux.
+**Wayland fallback.** `enigo`'s XTEST path is inert under Wayland (the
+compositor isolates clients from synthesising input). `platform::wayland_paste_tool`
+scans `$PATH` for `wtype` (preferred — daemonless, `virtual-keyboard` protocol)
+then `ydotool` (needs `ydotoold`). `platform::auto_paste_available` folds this
+into the `platform_info` reply so Settings only disables the toggle when no
+tool exists. This closes the prior gap where Wayland users got no auto-paste
+at all.
+
+**Dependency:** `enigo = "0.2"` in Cargo.toml. No feature flags required.
+`wtype`/`ydotool` are optional runtime tools, detected at call time — not build
+dependencies.
+
+## Perf instrumentation
+
+A handful of `info!("[perf] …")` probes measure the latencies that drove the
+"feels faster on Linux" question, so the answer rests on numbers rather than
+folklore. Run with `RUST_LOG=info` (or `debug`) to see them:
+
+| Probe | Where | Measures |
+|---|---|---|
+| `audio_start total=…ms (config/build/play)` | `commands.rs` `audio_start` | time-to-first-capture, broken into `default_input_config` → `build_input_stream` → `stream.play()` |
+| `auto_paste(enigo\|wayland:…) … in …ms` | `commands.rs` `dictation_auto_paste` | end-to-end keystroke-inject latency (includes the 50 ms focus settle) |
+| `dictation_first_paint: …ms since process start` | `commands.rs` `perf_mark`, called from `dictation.tsx` after a double-rAF | time-to-first-paint relative to `AppState::started_at` (set early in `run()`); the renderer also reports its WebView navigation-relative number |
 
 ---
 

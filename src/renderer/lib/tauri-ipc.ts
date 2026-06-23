@@ -171,10 +171,18 @@ export const setMinimizeToTray = (value: boolean): Promise<OkResult> =>
 export interface PlatformInfo {
   os: string
   is_wayland: boolean
+  /** Whether auto-paste can inject a keystroke. False on Wayland with no
+   *  `wtype`/`ydotool` installed; true on X11, Windows, and macOS. */
+  auto_paste_available: boolean
 }
 
 export const getPlatformInfo = (): Promise<PlatformInfo> =>
   invoke('platform_info')
+
+/** Perf marker — logs `label` with elapsed-since-process-start on the Rust side
+ *  (`[perf] …`, visible under `RUST_LOG=info`). Best-effort; never throws. */
+export const perfMark = (label: string): Promise<OkResult> =>
+  invoke('perf_mark', { label })
 
 // ── Theme & settings broadcast ────────────────────────────────────────────────
 
