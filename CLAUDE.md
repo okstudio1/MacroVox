@@ -28,13 +28,15 @@ The dev launcher is the Python wrapper [run.py](run.py) at repo root (checks Nod
 | Tauri version-drift check | `npm run check:versions` |
 | Build with offline Whisper STT | `cargo build --manifest-path src-tauri/Cargo.toml --features local-stt` |
 
+**CI** ([.github/workflows](.github/workflows)): tauri version parity, TypeScript (`tsc --noEmit` + `npm test`), Rust clippy (`-D warnings`), Python (`pyright` over run.py and the shims), plus Semgrep (CI only, ERROR severity gates). Keep `run.py` and the other Python shims pyright-clean.
+
 Pre-push gates: `npm test`, `npm run test:rust`, `npx tsc --noEmit`, `npm run check:versions`, plus `cargo fmt` and `cargo clippy`. There is NO ESLint anywhere; TS static analysis is `tsc --noEmit` plus Semgrep (CI only, ERROR severity gates).
 
 Release is split-host and mostly manual (see [docs/RELEASE.md](docs/RELEASE.md)). Pushing a `v*.*.*` tag triggers [.github/workflows/release.yml](.github/workflows/release.yml), which builds ONLY the Linux bundle and uploads it as a `linux-bundle` artifact (it does NOT publish a GitHub release). Windows installers are built + EV-signed locally (SafeNet eToken), then published by hand to the SEPARATE public repo `okstudio1/macrovox-releases`. Staging scripts: `npm run release:windows` / `release:linux` / `release:manifest` / `release:sbom`.
 
 ## Architecture
 
-**Rust backend ([src-tauri/](src-tauri/)).** Owns audio capture (cpal/WASAPI), STT (Deepgram streaming WS + batch REST, optional local whisper-rs), a rolling OGG-Opus dictation-history "voice buffer", native auto-paste (enigo SendInput), the global hotkey, and a two-window model. All mutable state lives in a single `AppState` ([src-tauri/src/state.rs](src-tauri/src/state.rs)) injected via `tauri::State`. Entry point [src-tauri/src/main.rs](src-tauri/src/main.rs) is a stub calling `macrovox_lib::run()`; real setup (plugin + window + hotkey registration) is [src-tauri/src/lib.rs](src-tauri/src/lib.rs). Read [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.md) first (it is accurate but stale in a few spots, see Gotchas).
+**Rust backend ([src-tauri/](src-tauri/)).** Owns audio capture (cpal/WASAPI), STT (Deepgram streaming WS + batch REST, optional local whisper-rs), a rolling OGG-Opus dictation-history "voice buffer", native auto-paste (enigo SendInput), the global hotkey, and a two-window model. All mutable state lives in a single `AppState` ([src-tauri/src/state.rs](src-tauri/src/state.rs)) injected via `tauri::State`. Entry point [src-tauri/src/main.rs](src-tauri/src/main.rs) is a stub calling `macrovox_lib::run()`; real setup (plugin + window + hotkey registration) is [src-tauri/src/lib.rs](src-tauri/src/lib.rs). Key modules: `commands.rs` (IPC), `audio.rs` (cpal/WASAPI), `deepgram_ws.rs`, `voice_buffer.rs`, `platform.rs`. Read [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.md) first (it is accurate but stale in a few spots, see Gotchas).
 
 **The IPC contract.** The renderer talks to Rust ONLY through 28 `#[tauri::command]` functions (all in [src-tauri/src/commands.rs](src-tauri/src/commands.rs)) plus backend->renderer emit events. Two files must stay in lockstep: every command must be listed in the `tauri::generate_handler![...]` macro in [src-tauri/src/lib.rs](src-tauri/src/lib.rs) AND mirrored in the typed bridge [src/renderer/lib/tauri-ipc.ts](src/renderer/lib/tauri-ipc.ts). That bridge is the single import surface for the renderer (`import * as ipc from '../lib/tauri-ipc'`); it wraps `invoke()` for commands and `listen()`/`emit()` for events, and deliberately mirrors the old Electron `window.electronAPI.*` shape. JS camelCase args auto-convert to Rust snake_case. Emit events (the push side): `deepgram:transcript` `{transcript,isFinal}`, `deepgram:error`, `quick-dictation-toggle` (global hotkey, default Ctrl+Space), `theme-changed`, `settings-changed`, `voice-buffer-updated`.
 
@@ -44,9 +46,9 @@ Release is split-host and mostly manual (see [docs/RELEASE.md](docs/RELEASE.md))
 
 **Two-tier JS/TS build.** [vite.config.ts](vite.config.ts) bundles the live renderer (`src/renderer/**`) to `dist/renderer`. SEPARATELY, [config/tsconfig.main.json](config/tsconfig.main.json) compiles `src/main/**` to `dist/main` as CommonJS. The `src/main` project is dead Electron-era code (see Gotchas). `npm run build` runs both JS pipelines but NOT Rust; `npx tauri build`'s `beforeBuildCommand` runs only `build:renderer`.
 
-**Managed backend.** Real STT/LLM keys never ship in the client. Auth/billing are entirely renderer-side via the Supabase JS SDK ([src/renderer/lib/auth.ts](src/renderer/lib/auth.ts), [src/renderer/lib/supabase.ts](src/renderer/lib/supabase.ts)), using `VITE_SUPABASE_URL` + `VITE_SUPABASE_KEY` (anon key, client-safe). The Netlify claude-proxy ([netlify/functions/claude-proxy.ts](netlify/functions/claude-proxy.ts)) holds `ANTHROPIC_MANAGED_KEY` and gates on: origin allowlist -> Supabase JWT verify -> `subscriptions.status` in (pro,team) -> hourly rate limit -> model allowlist. A `deepgram-proxy` exists but is UNUSED (the managed Deepgram key is handed to the Rust backend for direct low-latency streaming; [src/renderer/config.ts](src/renderer/config.ts) only keeps the URL constant). Stripe runs as Supabase EDGE functions (Deno) in [supabase/functions/](supabase/functions/): create-checkout, billing-portal, stripe-webhook (the webhook has `verify_jwt=false` and checks Stripe's HMAC itself).
+**Managed backend.** Real STT/LLM keys never ship in the client. BYOK path: `localStorage.user_deepgram_key`/`user_anthropic_key` win and skip sign-in. Auth/billing are entirely renderer-side via the Supabase JS SDK ([src/renderer/lib/auth.ts](src/renderer/lib/auth.ts), [src/renderer/lib/supabase.ts](src/renderer/lib/supabase.ts)), using `VITE_SUPABASE_URL` + `VITE_SUPABASE_KEY` (anon key, client-safe). The Netlify claude-proxy ([netlify/functions/claude-proxy.ts](netlify/functions/claude-proxy.ts)) holds `ANTHROPIC_MANAGED_KEY` and gates on: origin allowlist -> Supabase JWT verify -> `subscriptions.status` in (pro,team) -> hourly rate limit -> model allowlist. A `deepgram-proxy` exists but is UNUSED (the managed Deepgram key is handed to the Rust backend for direct low-latency streaming; [src/renderer/config.ts](src/renderer/config.ts) only keeps the URL constant). Stripe runs as Supabase EDGE functions (Deno) in [supabase/functions/](supabase/functions/): create-checkout, billing-portal, stripe-webhook (the webhook has `verify_jwt=false` and checks Stripe's HMAC itself).
 
-## Gotchas & conventions
+## Gotchas
 
 **`src/main/*` is DEAD Electron code, do not edit it expecting runtime effect.** package.json has no `electron` dependency, so it cannot even compile against installed deps; no release path builds or imports it. `main: dist/main/main.js` and the `build:main`/`dev:main`/`clean:main` scripts are vestigial. Live equivalents: backend -> [src-tauri/src/](src-tauri/src/); renderer IPC -> [src/renderer/lib/tauri-ipc.ts](src/renderer/lib/tauri-ipc.ts); auth/billing -> [src/renderer/lib/auth.ts](src/renderer/lib/auth.ts).
 
@@ -66,4 +68,19 @@ Release is split-host and mostly manual (see [docs/RELEASE.md](docs/RELEASE.md))
 
 **Shared cargo target dir (this machine):** if `~/.cargo/config.toml` redirects Rust output (here to `C:/Users/Owen/cargo-target`), bundles land there, NOT under `src-tauri/target/`. `npm run release:windows` reads the `src-tauri/target` path and will silently copy nothing; copy Windows artifacts by hand in that case.
 
-**Conventions.** Conventional commits (feat/fix/docs/refactor/chore/test), subject under ~72 chars. NEVER add `Co-Authored-By` trailers. NEVER use em dashes or en dashes anywhere (code, docs, commits, PRs); use periods, colons, commas, or parentheses. TypeScript strict mode; `cargo fmt` + clippy for Rust. TSDoc/rustdoc on exported APIs, inline comments only for non-obvious "why". Accessibility is a hard requirement for UI changes (large targets, clear feedback, no fast or fine motor control needed).
+## Conventions
+
+- **Conventional commits** (feat/fix/docs/refactor/chore/test), subject under ~72 chars. NEVER add `Co-Authored-By` trailers or any AI attribution.
+- **NEVER use em dashes or en dashes** anywhere (code, docs, commits, PRs); use periods, colons, commas, or parentheses.
+- **No ESLint anywhere.** TS static analysis is `tsc --noEmit` (TypeScript strict mode) plus Semgrep (CI). Rust: `cargo fmt` + clippy.
+- Tests required for behavior changes: renderer -> Vitest in `src/renderer/**/__tests__/`; backend -> `#[cfg(test)]` under `src-tauri/src/`.
+- TSDoc/rustdoc on exported APIs; inline comments only for non-obvious "why".
+- **Accessibility is a hard requirement** for any UI change: large targets, clear feedback, no fast or fine motor control needed.
+
+## When to ask
+
+- Changing the IPC surface, the Netlify/Supabase proxies, CSP/`connect-src`, or Stripe/billing flows (security and revenue impact).
+- Editing signing / release scripts or the updater manifest.
+- Any change to the audio pipeline or the Deepgram/Claude request paths (call it out in the PR per CONTRIBUTING.md).
+- Schema or `subscriptions` gating changes, or anything that would place a real key in the client.
+- Ambiguous spec, or a change that would touch the dead `src/main` / deferred hooks (confirm it is actually wired to live code first).
