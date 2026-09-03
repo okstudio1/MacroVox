@@ -18,6 +18,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
+use crate::deepgram_ws::DeepgramCredential;
 use crate::state::AppState;
 
 // ── Shortcut parsing ─────────────────────────────────────────────────────────
@@ -335,9 +336,14 @@ pub fn audio_get_level(state: State<AppState>) -> f64 {
 ///    callback starts both buffering (batch fallback) and streaming (WS path).
 ///
 /// Transcripts are pushed back to the renderer as `"deepgram:transcript"` events.
+///
+/// The `credential` is either the user's own API key or a short-lived token
+/// from the `deepgram-grant` function. See `DeepgramCredential`: the two use
+/// different `Authorization` schemes, so which one this is has to be stated
+/// rather than guessed from the string.
 #[tauri::command]
 pub async fn deepgram_start(
-    api_key: String,
+    credential: DeepgramCredential,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<OkResponse, String> {
@@ -363,7 +369,7 @@ pub async fn deepgram_start(
     debug!("[deepgram] Starting session: {}Hz, {}ch, {} keywords, numbers={}, lang={}",
            sample_rate, channels, keywords.len(), number_format, language);
 
-    match crate::deepgram_ws::start_session(&api_key, sample_rate, channels, &keywords, &number_format, &language, app).await {
+    match crate::deepgram_ws::start_session(&credential, sample_rate, channels, &keywords, &number_format, &language, app).await {
         Ok(sender) => {
             debug!("[deepgram] WebSocket session established");
             // Replace any existing sender first — on a double-start the previous
@@ -433,7 +439,7 @@ pub fn recording_start(state: State<AppState>) -> OkResponse {
 /// The `Err` arm is unreachable — failures are expressed through `RecordingStopResponse`.
 #[tauri::command]
 pub async fn recording_stop(
-    api_key: String,
+    credential: DeepgramCredential,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<RecordingStopResponse, String> {
@@ -480,7 +486,7 @@ pub async fn recording_stop(
     let client = reqwest::Client::new();
     let resp = match client
         .post(&url)
-        .header("Authorization", format!("Token {api_key}"))
+        .header("Authorization", credential.header_value())
         .header("Content-Type", "audio/wav")
         .body(wav)
         .send()
@@ -1067,7 +1073,7 @@ pub fn voice_buffer_update_transcript(
 #[tauri::command]
 pub async fn voice_buffer_reprocess(
     filename: String,
-    api_key: String,
+    credential: DeepgramCredential,
     state: State<'_, AppState>,
 ) -> Result<RecordingStopResponse, String> {
     let dir = lock_or_recover(&state.voice_buffer_dir).clone();
@@ -1132,7 +1138,7 @@ pub async fn voice_buffer_reprocess(
     let client = reqwest::Client::new();
     let resp = match client
         .post(&url)
-        .header("Authorization", format!("Token {api_key}"))
+        .header("Authorization", credential.header_value())
         .header("Content-Type", "audio/wav")
         .body(wav)
         .send()

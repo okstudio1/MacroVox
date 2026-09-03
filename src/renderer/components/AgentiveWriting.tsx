@@ -13,6 +13,7 @@
 import { useState, useRef } from 'react'
 import { Mic, MicOff, Copy, Check, RefreshCw, Loader2 } from 'lucide-react'
 import { useAgentiveWriting } from '../hooks/useAgentiveWriting'
+import { resolveDeepgramCredential } from '../lib/deepgramCredential'
 import * as ipc from '../lib/tauri-ipc'
 import type { AppUser } from '../lib/tauri-ipc'
 
@@ -20,10 +21,11 @@ interface Props {
   /** Authenticated user (drives Pro/Team gating in `useAgentiveWriting`). */
   user: AppUser | null
   /** Deepgram API key from the user's managed-keys row. */
-  apiKey: string | null
+  /** Whether transcription is available. Not a credential: see lib/deepgramCredential.ts. */
+  canTranscribe: boolean
 }
 
-export function AgentiveWriting({ user, apiKey }: Props) {
+export function AgentiveWriting({ user, canTranscribe }: Props) {
   const [isRecording, setIsRecording] = useState(false)
   const [isPreparing, setIsPreparing] = useState(false)
   const [command, setCommand]         = useState('')
@@ -39,7 +41,7 @@ export function AgentiveWriting({ user, apiKey }: Props) {
   })
 
   const handleStartRecording = async () => {
-    if (!apiKey) return
+    if (!canTranscribe) return
     setError(null)
     setIsPreparing(true)
     setAudioLevel(0)
@@ -61,7 +63,7 @@ export function AgentiveWriting({ user, apiKey }: Props) {
   }
 
   const handleStopAndGenerate = async () => {
-    if (!apiKey) return
+    if (!canTranscribe) return
 
     if (audioLevelIntervalRef.current) {
       clearInterval(audioLevelIntervalRef.current)
@@ -70,7 +72,13 @@ export function AgentiveWriting({ user, apiKey }: Props) {
     setIsRecording(false)
     setAudioLevel(0)
 
-    const result = await ipc.stopRecording(apiKey)
+    const credential = await resolveDeepgramCredential()
+    if (!credential.success) {
+      setError(credential.error)
+      return
+    }
+
+    const result = await ipc.stopRecording(credential.credential)
     if (!result.success || !result.transcript) {
       setError(result.error || 'Nothing was transcribed')
       return
@@ -109,7 +117,7 @@ export function AgentiveWriting({ user, apiKey }: Props) {
     }
   }
 
-  const canRecord = !!apiKey && !isRecording && !isPreparing && !isGenerating
+  const canRecord = canTranscribe && !isRecording && !isPreparing && !isGenerating
 
   return (
     <div className="flex flex-col gap-3 flex-1 min-h-0">
@@ -132,7 +140,7 @@ export function AgentiveWriting({ user, apiKey }: Props) {
           className="shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-md"
           style={{
             backgroundColor: isRecording ? 'var(--danger)' : 'var(--accent-primary)',
-            opacity: (!apiKey || isPreparing || isGenerating) && !isRecording ? 0.5 : 1,
+            opacity: (!canTranscribe || isPreparing || isGenerating) && !isRecording ? 0.5 : 1,
           }}
           title={isRecording ? 'Stop & generate' : 'Speak your request'}
         >
@@ -170,7 +178,7 @@ export function AgentiveWriting({ user, apiKey }: Props) {
             className="text-xs flex-1 truncate italic"
             style={{ color: command ? 'var(--text-secondary)' : 'var(--text-muted)' }}
           >
-            {!apiKey
+            {!canTranscribe
               ? 'Sign in & subscribe to start'
               : isGenerating
                 ? '◎ Writing...'

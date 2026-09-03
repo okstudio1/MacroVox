@@ -10,6 +10,9 @@ export const SITE_URL = import.meta.env.DEV
 export const API = {
   claudeProxy:      `${SITE_URL}/.netlify/functions/claude-proxy`,
   deepgramProxy:    `${SITE_URL}/.netlify/functions/deepgram-proxy`,
+  // Exchanges a Supabase session for a short-lived Deepgram token, so the
+  // managed key never reaches this process. See lib/deepgramCredential.ts.
+  deepgramGrant:    `${SITE_URL}/.netlify/functions/deepgram-grant`,
 } as const
 
 // Haiku for fast cleanup tasks; Sonnet for quality writing generation

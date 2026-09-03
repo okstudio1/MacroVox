@@ -9,7 +9,7 @@
  *
  * Command name mapping (JS camelCase → Rust snake_case auto-converted by Tauri):
  *   invoke("audio_list_devices")   ↔  audio_list_devices()
- *   invoke("deepgram_start", {...}) ↔  deepgram_start(api_key: String)
+ *   invoke("deepgram_start", {...}) ↔  deepgram_start(credential: DeepgramCredential)
  *   etc.
  *
  * Event name mapping (emitted from Rust via app.emit()):
@@ -31,6 +31,9 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 
 // Re-export AppUser so existing component imports (`from '../lib/tauri-ipc'`) still resolve.
 export type { AppUser } from './auth'
+
+import type { DeepgramCredential } from './deepgramCredential'
+export type { DeepgramCredential } from './deepgramCredential'
 
 // ── Shared response types ─────────────────────────────────────────────────────
 
@@ -108,8 +111,8 @@ export const getAudioLevel = (): Promise<number> =>
 
 // ── Deepgram streaming ────────────────────────────────────────────────────────
 
-export const startDeepgram = (apiKey: string): Promise<OkResult> =>
-  invoke('deepgram_start', { apiKey })
+export const startDeepgram = (credential: DeepgramCredential): Promise<OkResult> =>
+  invoke('deepgram_start', { credential })
 
 export const stopDeepgram = (): Promise<OkResult> =>
   invoke('deepgram_stop')
@@ -127,8 +130,8 @@ export const onStreamingError = (
 export const startRecording = (): Promise<OkResult> =>
   invoke('recording_start')
 
-export const stopRecording = (apiKey: string): Promise<RecordingStopResult> =>
-  invoke('recording_stop', { apiKey })
+export const stopRecording = (credential: DeepgramCredential): Promise<RecordingStopResult> =>
+  invoke('recording_stop', { credential })
 
 export const cancelRecording = (): Promise<OkResult> =>
   invoke('recording_cancel')
@@ -245,8 +248,8 @@ export const voiceBufferSave = (transcript: string): Promise<OkResult> =>
 export const voiceBufferUpdateTranscript = (filename: string, transcript: string): Promise<OkResult> =>
   invoke('voice_buffer_update_transcript', { filename, transcript })
 
-export const voiceBufferReprocess = (filename: string, apiKey: string): Promise<RecordingStopResult> =>
-  invoke('voice_buffer_reprocess', { filename, apiKey })
+export const voiceBufferReprocess = (filename: string, credential: DeepgramCredential): Promise<RecordingStopResult> =>
+  invoke('voice_buffer_reprocess', { filename, credential })
 
 export const voiceBufferOpenFolder = (): Promise<OkResult> =>
   invoke('voice_buffer_open_folder')

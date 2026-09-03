@@ -123,7 +123,6 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
     localStorage.getItem('voice_buffer_max_size') || String(100 * 1024 * 1024)
   )
   const [voiceBufferInfo, setVoiceBufferInfo] = useState<ipc.VoiceBufferInfo | null>(null)
-  const [deepgramKey, setDeepgramKey] = useState<string | null>(null)
 
   // Bring-your-own API keys. Persisted to localStorage and broadcast so the
   // dictation window picks them up live (see ALLOWED_SETTINGS_KEYS in tauri-ipc).
@@ -155,14 +154,6 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
   useEffect(() => {
     ipc.getPlatformInfo().then(setPlatformInfo).catch(() => {})
   }, [])
-
-  useEffect(() => {
-    if (user) {
-      auth.getManagedKeys().then(result => {
-        if (result.success && result.deepgramKey) setDeepgramKey(result.deepgramKey)
-      }).catch(() => {})
-    }
-  }, [user])
 
   const handleEmailAuth = async () => {
     if (!authEmail || !authPassword) return
@@ -1072,7 +1063,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                     </div>
                   )}
 
-                  <VoiceHistory user={user ? { id: user.id } : null} apiKey={deepgramKey} />
+                  <VoiceHistory user={user ? { id: user.id } : null} />
                 </>
               )}
             </div>

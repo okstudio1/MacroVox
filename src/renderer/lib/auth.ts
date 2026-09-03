@@ -191,10 +191,16 @@ export async function getSubscription(): Promise<GetSubscriptionResult> {
  * Fetches managed API keys (Deepgram, Anthropic) from the Supabase
  * `managed_api_keys` table.  Only provisioned for Pro/Team subscribers.
  *
- * The Anthropic key is intentionally never returned to the renderer — Claude
- * calls go through the Netlify claude-proxy which holds the key server-side.
- * Only the Deepgram key is exposed (the Rust backend uses it directly for
- * low-latency streaming; routing it through the proxy is a planned change).
+ * Neither key is returned to the renderer any more. Claude calls go through the
+ * Netlify claude-proxy, which holds that key server-side. Deepgram streaming
+ * now goes through `lib/deepgramCredential.ts`, which trades the Supabase
+ * session for a token that expires in about a minute.
+ *
+ * This used to hand the managed Deepgram key to the client, because a
+ * request-and-response function cannot proxy a socket held open for a whole
+ * recording. `/v1/auth/grant` solves that without a proxy: granting a token IS
+ * request-and-response. What survives here is the entitlement check, which is
+ * a boolean and should always have been one.
  */
 export async function getManagedKeys(): Promise<ManagedKeysResult> {
   if (DEV_MODE) {
@@ -210,9 +216,12 @@ export async function getManagedKeys(): Promise<ManagedKeysResult> {
   const { data: { session } } = await supabase.auth.getSession()
   if (!session?.user) return { success: false, hasManagedKeys: false }
 
+  // Only whether a row exists, never the key itself. Selecting `deepgram_key`
+  // to test for presence would transport the secret to do the work of a
+  // boolean, which is how it ended up in this process in the first place.
   const { data, error } = await supabase
     .from('managed_api_keys')
-    .select('deepgram_key')
+    .select('user_id')
     .eq('user_id', session.user.id)
     .single()
 
@@ -222,9 +231,12 @@ export async function getManagedKeys(): Promise<ManagedKeysResult> {
 
   return {
     success: true,
-    deepgramKey: data.deepgram_key || null,
-    anthropicKey: null, // Claude is proxy-only — renderer never sees the key.
-    hasManagedKeys: !!data.deepgram_key,
+    // Both null, always. Claude is proxy-only, and Deepgram is now token-only:
+    // see lib/deepgramCredential.ts, which trades the Supabase session for a
+    // credential that expires in about a minute.
+    deepgramKey: null,
+    anthropicKey: null,
+    hasManagedKeys: true,
   }
 }
 

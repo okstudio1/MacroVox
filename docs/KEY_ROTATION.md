@@ -81,6 +81,27 @@ supabase functions deploy stripe-webhook
 
 ## 5. Update existing managed_api_keys rows
 
+> **Deepgram changed, 2026-09-03.** The renderer no longer reads
+> `deepgram_key` at all. Streaming and batch both resolve a short-lived
+> token from the `deepgram-grant` function, which holds
+> `DEEPGRAM_MANAGED_KEY` server-side. The row is now an entitlement
+> marker and nothing more.
+>
+> Two consequences for a rotation:
+>
+> 1. `deepgram_key` in this table no longer needs updating for clients to
+>    work. Setting it to `NULL` is the tidier move, because a column that
+>    is never read is a column that leaks the next time someone selects
+>    `*`.
+> 2. **Every managed Deepgram key handed out before that date is
+>    compromised** and has to be revoked in the Deepgram console, not just
+>    replaced here. It sat in a desktop process on every Pro and Team
+>    machine, and anyone who kept a copy still has it. Rotating the env var
+>    without revoking the old key leaves it working.
+>
+> The Anthropic column was never read by the renderer, so nothing about it
+> changes.
+
 Pro users have the old key stored in their `managed_api_keys` row. Until
 those rows are updated, the renderer will keep handing the old key to
 the Tauri backend for direct Deepgram calls.

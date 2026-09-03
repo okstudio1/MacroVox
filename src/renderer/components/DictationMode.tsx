@@ -32,6 +32,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import * as ipc from '../lib/tauri-ipc'
 import type { AppUser } from '../lib/tauri-ipc'
 import * as auth from '../lib/auth'
+import { ownKey, resolveDeepgramCredential } from '../lib/deepgramCredential'
 
 export function DictationMode() {
   const [isRecording, setIsRecording] = useState(false)
@@ -40,7 +41,10 @@ export function DictationMode() {
   const [transcript, setTranscript] = useState('')
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [apiKey, setApiKey] = useState<string | null>(null)
+  // Whether transcription is available at all, not the credential itself.
+  // The credential is resolved per call in lib/deepgramCredential.ts, because
+  // the managed one is a token that expires in about a minute.
+  const [canTranscribe, setCanTranscribe] = useState(false)
   const [isLoadingKey, setIsLoadingKey] = useState(true)
   const [user, setUser] = useState<AppUser | null>(null)
   const [audioLevel, setAudioLevel] = useState(0)
@@ -133,12 +137,11 @@ export function DictationMode() {
   }, [])
 
   const loadApiKey = useCallback(async () => {
-    // Bring-your-own-key wins: if the user saved a Deepgram key in Settings →
-    // API Keys, use it directly and skip the managed-key lookup entirely. This
-    // lets the app run with no sign-in / subscription.
-    const ownKey = (localStorage.getItem('user_deepgram_key') || '').trim()
-    if (ownKey) {
-      setApiKey(ownKey)
+    // Bring-your-own-key wins: if the user saved a Deepgram key in Settings then
+    // API Keys, use it and skip the entitlement lookup entirely. This lets the
+    // app run with no sign-in and no subscription.
+    if (ownKey()) {
+      setCanTranscribe(true)
       setIsLoadingKey(false)
       // Still resolve the user (if signed in) so account UI/post-processing
       // proxy stays available, but don't let a failure block recording.
@@ -154,19 +157,20 @@ export function DictationMode() {
       if (userResult.success && userResult.user) {
         setUser(userResult.user)
         try {
+          // Entitlement only. No key comes back any more.
           const keysResult = await auth.getManagedKeys()
-          if (keysResult.success && keysResult.deepgramKey) {
-            setApiKey(keysResult.deepgramKey)
+          if (keysResult.success && keysResult.hasManagedKeys) {
+            setCanTranscribe(true)
             setIsLoadingKey(false)
             return
           }
         } catch {
-          // Managed keys not available — fall through to free tier
+          // Not entitled, or the lookup failed. Fall through to free tier.
         }
       }
     } catch {}
 
-    setApiKey(null)
+    setCanTranscribe(false)
     setIsLoadingKey(false)
   }, [])
 
@@ -201,7 +205,7 @@ export function DictationMode() {
   }, [loadApiKey])
 
   const handleStartRecording = async () => {
-    if (!apiKey || operationInProgressRef.current) return
+    if (!canTranscribe || operationInProgressRef.current) return
     operationInProgressRef.current = true
     setError(null)
 
@@ -216,7 +220,13 @@ export function DictationMode() {
     try {
       if (transcriptionMode === 'streaming') {
         if (!clearOnNewRecording) streamingTranscriptRef.current = transcript || ''
-        const result = await ipc.startDeepgram(apiKey)
+        const credential = await resolveDeepgramCredential()
+        if (!credential.success) {
+          setError(credential.error)
+          setIsPreparing(false)
+          return
+        }
+        const result = await ipc.startDeepgram(credential.credential)
         if (!result.success) {
           setError(result.error || 'Failed to start streaming')
           setIsPreparing(false)
@@ -256,7 +266,7 @@ export function DictationMode() {
   }
 
   const handleStopRecording = async () => {
-    if (!apiKey || operationInProgressRef.current) return
+    if (!canTranscribe || operationInProgressRef.current) return
     operationInProgressRef.current = true
 
     try {
@@ -310,7 +320,13 @@ export function DictationMode() {
       }
     } else {
       setIsProcessing(true)
-      const result = await ipc.stopRecording(apiKey)
+      const credential = await resolveDeepgramCredential()
+      if (!credential.success) {
+        setIsProcessing(false)
+        setError(credential.error)
+        return
+      }
+      const result = await ipc.stopRecording(credential.credential)
       setIsProcessing(false)
       if (result.success && result.transcript) {
         const rawSegment = result.transcript
@@ -375,7 +391,7 @@ export function DictationMode() {
   // Handle Ctrl+Space quick dictation shortcut (events from backend)
   useEffect(() => {
     const cleanupStart = ipc.onQuickDictationStart(() => {
-      if (apiKey && !isRecording && !isPreparing && !isProcessing) {
+      if (canTranscribe && !isRecording && !isPreparing && !isProcessing) {
         handleStartRecording()
       }
     })
@@ -383,7 +399,7 @@ export function DictationMode() {
     const cleanupToggle = ipc.onQuickDictationToggle(() => {
       if (isRecording) {
         handleStopAndCopy()
-      } else if (apiKey && !isPreparing && !isProcessing) {
+      } else if (canTranscribe && !isPreparing && !isProcessing) {
         handleStartRecording()
       }
     })
@@ -392,10 +408,10 @@ export function DictationMode() {
       cleanupStart()
       cleanupToggle()
     }
-  }, [apiKey, isRecording, isPreparing, isProcessing])
+  }, [canTranscribe, isRecording, isPreparing, isProcessing])
 
   const handleStopAndCopy = async () => {
-    if (!apiKey || operationInProgressRef.current) return
+    if (!canTranscribe || operationInProgressRef.current) return
     operationInProgressRef.current = true
 
     try {
@@ -411,7 +427,13 @@ export function DictationMode() {
     setIsRecording(false)
     setIsProcessing(true)
     setAudioLevel(0)
-    const result = await ipc.stopRecording(apiKey)
+    const stopCredential = await resolveDeepgramCredential()
+    if (!stopCredential.success) {
+      setIsProcessing(false)
+      setError(stopCredential.error)
+      return
+    }
+    const result = await ipc.stopRecording(stopCredential.credential)
     setIsProcessing(false)
     if (result.success && result.transcript) {
       const rawSegment = result.transcript
@@ -514,8 +536,8 @@ export function DictationMode() {
 
           <button
             onClick={isRecording ? handleStopRecording : handleStartRecording}
-            disabled={isProcessing || isPreparing || !apiKey}
-            className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg ${(!apiKey || isProcessing || isPreparing) ? 'opacity-50 cursor-not-allowed' : ''}`}
+            disabled={isProcessing || isPreparing || !canTranscribe}
+            className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg ${(!canTranscribe || isProcessing || isPreparing) ? 'opacity-50 cursor-not-allowed' : ''}`}
             style={{
               backgroundColor: isPreparing ? 'var(--warning, #d97706)' : isRecording ? 'var(--danger)' : 'var(--accent-primary)',
               border: `2px solid ${isPreparing ? 'var(--warning, #d97706)' : isRecording ? 'var(--danger)' : 'var(--accent-hover)'}`
@@ -562,7 +584,7 @@ export function DictationMode() {
 
         {/* Status */}
         <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
-          {!apiKey
+          {!canTranscribe
             ? 'Sign in & subscribe to start'
             : isPostProcessing
               ? '◎ AI cleanup...'

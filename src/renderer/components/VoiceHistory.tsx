@@ -11,15 +11,15 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { Play, Square, Trash2, Loader2, Sparkles, Copy, Check, ArrowDownWideNarrow, ArrowUpNarrowWide } from 'lucide-react'
 import { usePostProcessing } from '../hooks/usePostProcessing'
 import * as ipc from '../lib/tauri-ipc'
+import { resolveDeepgramCredential } from '../lib/deepgramCredential'
 import type { VoiceRecording } from '../lib/tauri-ipc'
 import { safeAudioMime } from '../lib/audio-mime'
 
 interface VoiceHistoryProps {
   user?: { id: string } | null
-  apiKey?: string | null
 }
 
-export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
+export function VoiceHistory({ user }: VoiceHistoryProps) {
   const [recordings, setRecordings] = useState<VoiceRecording[]>([])
   const [loading, setLoading] = useState(true)
   const [playingFile, setPlayingFile] = useState<string | null>(null)
@@ -113,12 +113,19 @@ export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
 
   const handleReprocess = async (file: string) => {
     setContextMenu(null)
-    if (!apiKey) return
+
+    // Resolved per call: the managed credential is a token that expires in
+    // about a minute, so there is nothing worth holding onto in component state.
+    const credential = await resolveDeepgramCredential()
+    if (!credential.success) {
+      console.warn('[VoiceHistory] No Deepgram credential:', credential.error)
+      return
+    }
 
     setReprocessingFile(file)
     try {
       // Step 1: Re-transcribe through Deepgram
-      const result = await ipc.voiceBufferReprocess(file, apiKey)
+      const result = await ipc.voiceBufferReprocess(file, credential.credential)
       if (!result.success || !result.transcript) {
         console.warn('[VoiceHistory] Re-transcription failed:', result.error)
         return

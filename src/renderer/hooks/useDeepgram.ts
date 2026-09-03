@@ -17,6 +17,7 @@
 
 import { useState, useRef, useCallback } from 'react'
 import * as ipc from '../lib/tauri-ipc'
+import { resolveDeepgramCredential } from '../lib/deepgramCredential'
 
 export function useDeepgram() {
   const [isRecording, setIsRecording] = useState(false)
@@ -30,11 +31,16 @@ export function useDeepgram() {
    * Begins capture. Returns `true` if the backend accepted the start; `false`
    * (and sets `error`) if it rejected. The audio level poller starts on success.
    */
-  const startRecording = useCallback(async (apiKey: string, mode: 'streaming' | 'batch' = 'batch') => {
+  const startRecording = useCallback(async (mode: 'streaming' | 'batch' = 'batch') => {
     setError(null)
 
     if (mode === 'streaming') {
-      const result = await ipc.startDeepgram(apiKey)
+      const credential = await resolveDeepgramCredential()
+      if (!credential.success) {
+        setError(credential.error)
+        return false
+      }
+      const result = await ipc.startDeepgram(credential.credential)
       if (!result.success) {
         setError(result.error || 'Failed to start streaming')
         return false
@@ -62,7 +68,7 @@ export function useDeepgram() {
    * `null` on failure). In streaming mode always resolves to `null` — the
    * transcript stream comes from `onTranscript` events handled by the caller.
    */
-  const stopRecording = useCallback(async (apiKey: string, mode: 'streaming' | 'batch' = 'batch') => {
+  const stopRecording = useCallback(async (mode: 'streaming' | 'batch' = 'batch') => {
     if (audioLevelIntervalRef.current) {
       clearInterval(audioLevelIntervalRef.current)
       audioLevelIntervalRef.current = null
@@ -76,8 +82,14 @@ export function useDeepgram() {
       return null // transcript comes via onTranscript events
     }
 
+    const credential = await resolveDeepgramCredential()
+    if (!credential.success) {
+      setError(credential.error)
+      return null
+    }
+
     setIsProcessing(true)
-    const result = await ipc.stopRecording(apiKey)
+    const result = await ipc.stopRecording(credential.credential)
     setIsProcessing(false)
 
     if (result.success && result.transcript) {

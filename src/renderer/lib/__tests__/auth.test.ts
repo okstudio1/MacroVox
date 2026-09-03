@@ -280,17 +280,35 @@ describe('getSubscription', () => {
 // ── getManagedKeys ───────────────────────────────────────────────────────────
 
 describe('getManagedKeys', () => {
-  it('NEVER returns an anthropic key to the renderer in production', async () => {
-    // Hard-coded boundary: Claude calls go through the proxy. Even if the
-    // Supabase row had an anthropic_key column, we don't read it.
+  it('NEVER returns a key to the renderer, only whether the user is entitled', async () => {
+    // Hard-coded boundary. Claude calls go through the proxy, and Deepgram
+    // streaming now uses a short-lived token from the deepgram-grant function,
+    // so neither key has any business being in this process.
     setSession(fakeSupabaseUser())
     mockSupabase.from.mockReturnValue(
-      singleResolves({ deepgram_key: 'dg-real-key' }),
+      singleResolves({ user_id: 'user-1' }),
     )
     const r = await auth.getManagedKeys()
-    expect(r.deepgramKey).toBe('dg-real-key')
+    expect(r.deepgramKey).toBeNull()
     expect(r.anthropicKey).toBeNull()
     expect(r.hasManagedKeys).toBe(true)
+  })
+
+  it('does not even ask the database for the key column', async () => {
+    // This used to select `deepgram_key` and return it, which transported the
+    // secret in order to do the work of a boolean. That is how the managed key
+    // ended up on every subscriber's machine. Selecting the id instead is the
+    // fix, so it is worth a test that fails if anyone widens it again.
+    setSession(fakeSupabaseUser())
+    const select = vi.fn().mockReturnValue({
+      eq: () => ({ single: () => Promise.resolve({ data: { user_id: 'user-1' }, error: null }) }),
+    })
+    mockSupabase.from.mockReturnValue({ select })
+
+    await auth.getManagedKeys()
+
+    expect(select).toHaveBeenCalledWith('user_id')
+    expect(select).not.toHaveBeenCalledWith(expect.stringContaining('key'))
   })
 
   it('returns hasManagedKeys=false when there is no session', async () => {
@@ -309,11 +327,13 @@ describe('getManagedKeys', () => {
     expect(r.anthropicKey).toBeNull()
   })
 
-  it('returns hasManagedKeys=false when the deepgram_key column is empty', async () => {
+  it('treats the row existing as the entitlement', async () => {
+    // Whether the key column is populated is the server's problem now. The
+    // renderer cannot see it, which is the entire point of the change.
     setSession(fakeSupabaseUser())
-    mockSupabase.from.mockReturnValue(singleResolves({ deepgram_key: '' }))
+    mockSupabase.from.mockReturnValue(singleResolves({ user_id: 'user-1' }))
     const r = await auth.getManagedKeys()
-    expect(r.hasManagedKeys).toBe(false)
+    expect(r.hasManagedKeys).toBe(true)
     expect(r.deepgramKey).toBeNull()
   })
 })
