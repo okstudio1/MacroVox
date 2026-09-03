@@ -1100,8 +1100,10 @@ pub async fn voice_buffer_reprocess(
         let channels = u16::from_le_bytes(channels_bytes).max(1);
         let sample_rate = u32::from_le_bytes(rate_bytes).max(1);
         let samples: Vec<i16> = raw_bytes[44..]
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| i16::from_le_bytes(*chunk))
             .collect();
         (samples, sample_rate, channels)
     };
