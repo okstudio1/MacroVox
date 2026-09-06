@@ -49,17 +49,29 @@ export interface GetUserResult {
   error?: string
 }
 
+/**
+ * Plans that carry managed transcription. Matches the check the
+ * `deepgram-grant` and `claude-proxy` functions make server-side; that one is
+ * the real gate, this one only decides whether the mic is offered.
+ */
+const MANAGED_PLANS: SubscriptionStatus[] = ['pro', 'team']
+
 export interface GetSubscriptionResult {
   success: boolean
   subscription?: SubscriptionInfo
   error?: string
 }
 
-export interface ManagedKeysResult {
+/**
+ * Whether the signed-in user may use managed transcription.
+ *
+ * Deliberately carries no key field of any kind. The predecessor of this type
+ * had `deepgramKey` and `anthropicKey`, and a shape that can hold a secret is
+ * a shape someone eventually fills.
+ */
+export interface ManagedEntitlementResult {
   success: boolean
-  deepgramKey?: string | null
-  anthropicKey?: string | null
-  hasManagedKeys?: boolean
+  entitled: boolean
   error?: string
 }
 
@@ -188,56 +200,46 @@ export async function getSubscription(): Promise<GetSubscriptionResult> {
 }
 
 /**
- * Fetches managed API keys (Deepgram, Anthropic) from the Supabase
- * `managed_api_keys` table.  Only provisioned for Pro/Team subscribers.
+ * Whether this user is entitled to managed transcription.
  *
- * Neither key is returned to the renderer any more. Claude calls go through the
- * Netlify claude-proxy, which holds that key server-side. Deepgram streaming
- * now goes through `lib/deepgramCredential.ts`, which trades the Supabase
- * session for a token that expires in about a minute.
+ * Answered from `subscriptions`, which is where entitlement has always
+ * actually lived: the Netlify functions gate on `status` in (`pro`, `team`)
+ * and this now asks the same question of the same table.
  *
- * This used to hand the managed Deepgram key to the client, because a
- * request-and-response function cannot proxy a socket held open for a whole
- * recording. `/v1/auth/grant` solves that without a proxy: granting a token IS
- * request-and-response. What survives here is the entitlement check, which is
- * a boolean and should always have been one.
+ * It deliberately does not read `managed_api_keys`. Narrowing that select to
+ * `user_id` was the first half of the fix and it was never the load-bearing
+ * half: RLS in Postgres is row-level, so a policy that let a user read their
+ * own row let them read every column in it, whatever this file chose to ask
+ * for. Anyone signed in could select `deepgram_key` from the browser console
+ * and walk off with the shared vendor credential. The companion migration
+ * drops that policy, revokes the columns and nulls them; this function is what
+ * lets the migration land without taking dictation down with it, because the
+ * answer it needs was never in that table to begin with.
+ *
+ * No key is returned, and there is no field to return one in. Claude goes
+ * through claude-proxy; Deepgram goes through `lib/deepgramCredential.ts`,
+ * which trades the Supabase session for a token that expires in a minute.
  */
-export async function getManagedKeys(): Promise<ManagedKeysResult> {
+export async function hasManagedTranscription(): Promise<ManagedEntitlementResult> {
   if (DEV_MODE) {
-    // Dev-only: let the renderer bypass Supabase sign-in with the keys pulled
-    // from `.env`. `import.meta.env.DEV` is false in production builds, so
-    // Vite dead-code-eliminates this branch — the keys are NOT bundled into
-    // release artifacts. Still, treat the VITE_* values as compromised and
-    // rotate before any real deploy (see SECURITY_AUDIT C2).
-    const dk = import.meta.env.VITE_DEEPGRAM_KEY || null
-    const ak = import.meta.env.VITE_ANTHROPIC_KEY || null
-    return { success: true, deepgramKey: dk, anthropicKey: ak, hasManagedKeys: !!(dk || ak) }
+    // Dev-only: `import.meta.env.DEV` is false in production builds, so Vite
+    // dead-code-eliminates this branch. A local `.env` key stands in for a
+    // subscription so `npm run dev` works without Stripe.
+    return { success: true, entitled: !!import.meta.env.VITE_DEEPGRAM_KEY }
   }
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session?.user) return { success: false, hasManagedKeys: false }
 
-  // Only whether a row exists, never the key itself. Selecting `deepgram_key`
-  // to test for presence would transport the secret to do the work of a
-  // boolean, which is how it ended up in this process in the first place.
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session?.user) return { success: false, entitled: false }
+
   const { data, error } = await supabase
-    .from('managed_api_keys')
-    .select('user_id')
+    .from('subscriptions')
+    .select('status')
     .eq('user_id', session.user.id)
     .single()
 
-  if (error || !data) {
-    return { success: true, hasManagedKeys: false, deepgramKey: null, anthropicKey: null }
-  }
+  if (error || !data) return { success: true, entitled: false }
 
-  return {
-    success: true,
-    // Both null, always. Claude is proxy-only, and Deepgram is now token-only:
-    // see lib/deepgramCredential.ts, which trades the Supabase session for a
-    // credential that expires in about a minute.
-    deepgramKey: null,
-    anthropicKey: null,
-    hasManagedKeys: true,
-  }
+  return { success: true, entitled: MANAGED_PLANS.includes(data.status as SubscriptionStatus) }
 }
 
 // ── Billing ───────────────────────────────────────────────────────────────────

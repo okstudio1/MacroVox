@@ -157,9 +157,10 @@ export function DictationMode() {
       if (userResult.success && userResult.user) {
         setUser(userResult.user)
         try {
-          // Entitlement only. No key comes back any more.
-          const keysResult = await auth.getManagedKeys()
-          if (keysResult.success && keysResult.hasManagedKeys) {
+          // Entitlement only, read from the subscription. No key exists to come
+          // back: see lib/deepgramCredential.ts for how a call authenticates.
+          const entitlement = await auth.hasManagedTranscription()
+          if (entitlement.success && entitlement.entitled) {
             setCanTranscribe(true)
             setIsLoadingKey(false)
             return

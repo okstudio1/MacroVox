@@ -53,8 +53,8 @@ production-impact step.
    ```powershell
    # From the local dev build, signed in as a Pro user:
    # post-processing should succeed (claude-proxy).
-   # dictation should transcribe (deepgram-proxy once C5 follow-up
-   # is wired through; for now the renderer still hits Deepgram direct).
+   # dictation should transcribe (deepgram-grant issues the token;
+   # the renderer never sees DEEPGRAM_MANAGED_KEY).
    ```
 
 ## 4. Update Supabase Edge Function secrets
@@ -102,26 +102,30 @@ supabase functions deploy stripe-webhook
 > The Anthropic column was never read by the renderer, so nothing about it
 > changes.
 
-Pro users have the old key stored in their `managed_api_keys` row. Until
-those rows are updated, the renderer will keep handing the old key to
-the Tauri backend for direct Deepgram calls.
+Nothing to update, and nothing to write here. Neither key column is read
+by anything any more, and both are revoked from the `authenticated` role
+and nulled by
+`supabase/migrations/20260905_managed_keys_stop_serving_secrets.sql`.
 
-Run in the Supabase SQL editor:
+**Do not put the new key in this table.** Writing it back is the one step
+that would undo the fix: the column has no reader, so a value in it can
+only ever be something for an attacker to find. The new keys belong in the
+Netlify environment (step 3) and the Supabase secrets (step 4), and nowhere
+else.
+
+Confirm the columns are still empty after a rotation:
 
 ```sql
--- Replace placeholder values with the new keys.
-UPDATE managed_api_keys
-SET
-  anthropic_key = '<new anthropic key>',
-  deepgram_key  = '<new deepgram key>';
-
--- Sanity check: every row should now have the new prefixes.
 SELECT
-  count(*) FILTER (WHERE anthropic_key LIKE 'sk-ant-%') AS anthropic_ok,
-  count(*) FILTER (WHERE deepgram_key  IS NOT NULL)     AS deepgram_ok,
+  count(*) FILTER (WHERE anthropic_key IS NOT NULL) AS anthropic_left,
+  count(*) FILTER (WHERE deepgram_key  IS NOT NULL) AS deepgram_left,
   count(*) AS total
 FROM managed_api_keys;
 ```
+
+Both `*_left` counts must be `0`. If either is not, something wrote a key
+back: find it before continuing, because step 7 revokes the old key and the
+row would then hold the only copy of a credential nothing reads.
 
 ## 6. Update local `.env`
 

@@ -48,30 +48,19 @@ export async function getSubscription(userId: string): Promise<SubscriptionInfo>
 }
 
 /**
- * Fetch managed API keys for Pro/Team users.
- * Returns null if user is on free tier or keys aren't provisioned.
+ * Always returns nulls. Kept as a stub so the IPC surface in `main.ts` and
+ * `preload.ts` keeps its shape.
+ *
+ * This used to select `deepgram_key, anthropic_key` and return them. Those
+ * columns are now revoked from the `authenticated` role and nulled, so the
+ * select would fail rather than leak, but a reader that only fails because the
+ * database refuses it is still a reader. Managed credentials never leave the
+ * server now: Claude through claude-proxy, Deepgram through deepgram-grant.
  */
 export async function getManagedApiKeys(
-  userId: string
+  _userId: string
 ): Promise<{ deepgramKey: string | null; anthropicKey: string | null }> {
-  try {
-    const supabase = getSupabaseClient()
-    const { data, error } = await supabase
-      .from('managed_api_keys')
-      .select('deepgram_key, anthropic_key')
-      .eq('user_id', userId)
-      .single()
-
-    if (error || !data) return { deepgramKey: null, anthropicKey: null }
-
-    return {
-      deepgramKey: data.deepgram_key || null,
-      anthropicKey: data.anthropic_key || null,
-    }
-  } catch (err) {
-    console.error('[Subscription] Error fetching managed keys:', err)
-    return { deepgramKey: null, anthropicKey: null }
-  }
+  return { deepgramKey: null, anthropicKey: null }
 }
 
 /**

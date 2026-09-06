@@ -7,8 +7,9 @@
  *     shapes (Google vs Facebook vs email-only).
  *   - Fail-closed paths return useful flags without throwing (no session, RLS
  *     blocked, missing subscription row).
- *   - getManagedKeys NEVER returns the anthropic key to the renderer — that's
- *     a deliberate security boundary (Claude calls go through the proxy).
+ *   - hasManagedTranscription answers from `subscriptions` and never touches
+ *     `managed_api_keys`. Both are deliberate security boundaries: no managed
+ *     key reaches this process, and the key table has no client read path.
  *   - Subscription tier maps to the right features object.
  *
  * Mocks: supabase client + the Tauri shell `open` (so OAuth/checkout don't
@@ -277,64 +278,76 @@ describe('getSubscription', () => {
   })
 })
 
-// ── getManagedKeys ───────────────────────────────────────────────────────────
+// ── hasManagedTranscription ────────────────────────────────────────────────────────────
 
-describe('getManagedKeys', () => {
-  it('NEVER returns a key to the renderer, only whether the user is entitled', async () => {
-    // Hard-coded boundary. Claude calls go through the proxy, and Deepgram
-    // streaming now uses a short-lived token from the deepgram-grant function,
-    // so neither key has any business being in this process.
+describe('hasManagedTranscription', () => {
+  it('reads the subscription and never the key table', async () => {
+    // The load-bearing assertion in this file. Narrowing the old select on
+    // `managed_api_keys` to `user_id` closed nothing, because RLS is
+    // row-level: a policy letting a user read their own row let them read
+    // `deepgram_key` out of it whatever this module chose to ask for. Not
+    // touching the table at all is what lets the migration drop that read
+    // policy without taking dictation down with it.
     setSession(fakeSupabaseUser())
-    mockSupabase.from.mockReturnValue(
-      singleResolves({ user_id: 'user-1' }),
-    )
-    const r = await auth.getManagedKeys()
-    expect(r.deepgramKey).toBeNull()
-    expect(r.anthropicKey).toBeNull()
-    expect(r.hasManagedKeys).toBe(true)
+    mockSupabase.from.mockReturnValue(singleResolves({ status: 'pro' }))
+
+    const r = await auth.hasManagedTranscription()
+
+    expect(r.entitled).toBe(true)
+    expect(mockSupabase.from).toHaveBeenCalledWith('subscriptions')
+    expect(mockSupabase.from).not.toHaveBeenCalledWith('managed_api_keys')
   })
 
-  it('does not even ask the database for the key column', async () => {
-    // This used to select `deepgram_key` and return it, which transported the
-    // secret in order to do the work of a boolean. That is how the managed key
-    // ended up on every subscriber's machine. Selecting the id instead is the
-    // fix, so it is worth a test that fails if anyone widens it again.
+  it('has no field that a key could be returned in', async () => {
+    // The predecessor returned `{ deepgramKey, anthropicKey, hasManagedKeys }`
+    // with the first two pinned to null. A shape that can carry a secret is a
+    // shape someone eventually fills, so the fields are gone rather than
+    // nulled, and this fails if one comes back.
     setSession(fakeSupabaseUser())
-    const select = vi.fn().mockReturnValue({
-      eq: () => ({ single: () => Promise.resolve({ data: { user_id: 'user-1' }, error: null }) }),
-    })
-    mockSupabase.from.mockReturnValue({ select })
+    mockSupabase.from.mockReturnValue(singleResolves({ status: 'pro' }))
 
-    await auth.getManagedKeys()
+    const r = await auth.hasManagedTranscription()
 
-    expect(select).toHaveBeenCalledWith('user_id')
-    expect(select).not.toHaveBeenCalledWith(expect.stringContaining('key'))
+    expect(Object.keys(r).sort()).toEqual(['entitled', 'success'])
   })
 
-  it('returns hasManagedKeys=false when there is no session', async () => {
+  it('entitles pro and team, and nothing else', async () => {
+    // The negative half matters more than the positive one: this decides
+    // whether the app offers the mic, and 'canceled' reading as entitled
+    // would point every lapsed subscriber at the grant endpoint.
+    const cases = [
+      ['pro', true],
+      ['team', true],
+      ['free', false],
+      ['canceled', false],
+      ['past_due', false],
+    ] as const
+
+    for (const [status, expected] of cases) {
+      vi.clearAllMocks()
+      setSession(fakeSupabaseUser())
+      mockSupabase.from.mockReturnValue(singleResolves({ status }))
+      const r = await auth.hasManagedTranscription()
+      expect(r.entitled, `status ${status}`).toBe(expected)
+    }
+  })
+
+  it('is not entitled when there is no session', async () => {
     setSession(null)
-    const r = await auth.getManagedKeys()
-    expect(r.hasManagedKeys).toBe(false)
-    expect(r.deepgramKey).toBeUndefined()
+    const r = await auth.hasManagedTranscription()
+    expect(r.success).toBe(false)
+    expect(r.entitled).toBe(false)
   })
 
-  it('returns hasManagedKeys=false when the user has no managed-keys row', async () => {
+  it('is not entitled when there is no subscription row', async () => {
+    // Fails open into the free tier rather than throwing: an RLS refusal and
+    // a brand-new account look identical here, and neither should break the
+    // app for someone who has their own key in Settings.
     setSession(fakeSupabaseUser())
     mockSupabase.from.mockReturnValue(singleResolves(null, { code: 'PGRST116' }))
-    const r = await auth.getManagedKeys()
-    expect(r.hasManagedKeys).toBe(false)
-    expect(r.deepgramKey).toBeNull()
-    expect(r.anthropicKey).toBeNull()
-  })
-
-  it('treats the row existing as the entitlement', async () => {
-    // Whether the key column is populated is the server's problem now. The
-    // renderer cannot see it, which is the entire point of the change.
-    setSession(fakeSupabaseUser())
-    mockSupabase.from.mockReturnValue(singleResolves({ user_id: 'user-1' }))
-    const r = await auth.getManagedKeys()
-    expect(r.hasManagedKeys).toBe(true)
-    expect(r.deepgramKey).toBeNull()
+    const r = await auth.hasManagedTranscription()
+    expect(r.success).toBe(true)
+    expect(r.entitled).toBe(false)
   })
 })
 

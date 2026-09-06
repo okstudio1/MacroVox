@@ -80,12 +80,22 @@ CREATE TABLE subscriptions (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Managed API keys for Pro users
+-- Legacy table. Both key columns are unused and must stay NULL.
+--
+-- It used to hold a per-subscriber copy of the shared DEEPGRAM_MANAGED_KEY and
+-- ANTHROPIC_MANAGED_KEY, which the client read back with its own session. That
+-- put one vendor credential in reach of every subscriber. Managed keys now stay
+-- in the function that uses them: ANTHROPIC_MANAGED_KEY in claude-proxy,
+-- DEEPGRAM_MANAGED_KEY in deepgram-grant, which exchanges it for a token that
+-- expires in a minute. Entitlement is the `subscriptions` row.
+--
+-- Do not add a key column to any table a client can read. If a future vendor
+-- needs one, give it a grant endpoint modelled on deepgram-grant.
 CREATE TABLE managed_api_keys (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL UNIQUE,
-  deepgram_key TEXT,
-  anthropic_key TEXT,
+  deepgram_key TEXT,   -- unused, always NULL, revoked from `authenticated`
+  anthropic_key TEXT,  -- unused, always NULL, revoked from `authenticated`
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -93,7 +103,7 @@ CREATE TABLE managed_api_keys (
 CREATE TABLE api_usage (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
-  service TEXT NOT NULL,       -- 'claude' or 'deepgram'
+  service TEXT NOT NULL,       -- 'claude', 'deepgram' or 'deepgram_grant'
   created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX idx_api_usage_user_service_time ON api_usage (user_id, service, created_at);
@@ -109,8 +119,17 @@ ALTER TABLE api_usage ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users read own subscription" ON subscriptions
   FOR SELECT USING (auth.uid() = user_id);
 
-CREATE POLICY "Users read own keys" ON managed_api_keys
-  FOR SELECT USING (auth.uid() = user_id);
+-- managed_api_keys deliberately has NO policy. RLS is enabled with none
+-- defined, which denies the `authenticated` role outright; the service role
+-- used by the Netlify and Edge functions bypasses RLS and is unaffected.
+--
+-- There was a "Users read own keys" policy here. RLS in Postgres is
+-- row-level, so it let any signed-in user select `deepgram_key` out of their
+-- own row and keep the shared vendor credential. Do not add it back. The
+-- entitlement question it was used for is answered by the `subscriptions`
+-- policy above, which carries no secret.
+REVOKE SELECT (deepgram_key, anthropic_key) ON managed_api_keys FROM authenticated;
+REVOKE SELECT (deepgram_key, anthropic_key) ON managed_api_keys FROM anon;
 ```
 
 ---

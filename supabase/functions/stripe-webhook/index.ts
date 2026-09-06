@@ -133,23 +133,19 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     return
   }
 
-  // Provision managed API keys
-  const deepgramKey = Deno.env.get('DEEPGRAM_MANAGED_KEY')
-  const anthropicKey = Deno.env.get('ANTHROPIC_MANAGED_KEY')
-
-  const { error: keyError } = await supabase
-    .from('managed_api_keys')
-    .upsert({
-      user_id: userId,
-      deepgram_key: deepgramKey ?? null,
-      anthropic_key: anthropicKey ?? null,
-    }, { onConflict: 'user_id' })
-
-  if (keyError) {
-    console.error('[stripe-webhook] Failed to provision managed keys')
-  } else {
-    console.log(`[stripe-webhook] Provisioned keys (${plan})`)
-  }
+  // Nothing to provision. The subscription row above IS the entitlement, and
+  // it is what every server-side gate already reads.
+  //
+  // This used to copy DEEPGRAM_MANAGED_KEY and ANTHROPIC_MANAGED_KEY into a
+  // `managed_api_keys` row, which a user could then read back with their own
+  // session. That put one shared vendor credential in reach of every
+  // subscriber. Both keys now stay in the functions that use them:
+  // ANTHROPIC_MANAGED_KEY in claude-proxy, DEEPGRAM_MANAGED_KEY in
+  // deepgram-grant, which exchanges it for a token that expires in a minute.
+  //
+  // Do not reintroduce a table that holds a key a client can reach. If a
+  // future vendor needs one, give it a grant endpoint like deepgram-grant.
+  console.log(`[stripe-webhook] Subscription active (${plan})`)
 }
 
 async function handleSubscriptionUpdated(sub: Stripe.Subscription) {
