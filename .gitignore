@@ -53,5 +53,9 @@ WixTools/
 # Crash dumps
 *.stackdump
 
+# PowerShell module analysis cache, created in whatever directory
+# PowerShell happens to run in
+/Microsoft/
+
 # LLM onboarding template (repo-specific file is LLM_ONBOARDING.md)
 LLM_ONBOARDING_TEMPLATE.md
