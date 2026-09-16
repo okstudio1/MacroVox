@@ -62,6 +62,9 @@ pub struct ActiveRecording {
     pub filename: String,
     /// When capture began; becomes the manifest timestamp.
     pub started_at: chrono::DateTime<chrono::Local>,
+    /// Voice-history epoch when capture began. A clear during the session bumps
+    /// the live epoch, so registering this file afterwards is refused.
+    pub history_epoch: u64,
     /// Writer thread. Joins once the tap is dropped and the file is finalized.
     pub worker: JoinHandle<Result<FinishedFile, String>>,
 }

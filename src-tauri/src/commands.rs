@@ -366,24 +366,16 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
     *lock_or_recover(&state.audio_sample_rate) = config.sample_rate().0;
     *lock_or_recover(&state.audio_channels) = config.channels();
 
-    let level = Arc::clone(&state.audio_level);
-    let buffer = Arc::clone(&state.recording_buffer);
-    let is_recording = Arc::clone(&state.is_recording);
+    let capture = crate::audio::CaptureState {
+        level: Arc::clone(&state.audio_level),
+        buffer: Arc::clone(&state.recording_buffer),
+        is_recording: Arc::clone(&state.is_recording),
+        dg_sender: Arc::clone(&state.dg_sender),
+        capture_tap: Arc::clone(&state.capture_tap),
+        limit_reached: Arc::clone(&state.recording_limit_reached),
+    };
 
-    let dg_sender = Arc::clone(&state.dg_sender);
-    let capture_tap = Arc::clone(&state.capture_tap);
-    let limit_reached = Arc::clone(&state.recording_limit_reached);
-
-    match crate::audio::build_input_stream(
-        &device,
-        &config,
-        level,
-        buffer,
-        is_recording,
-        dg_sender,
-        capture_tap,
-        limit_reached,
-    ) {
+    match crate::audio::build_input_stream(&device, &config, capture) {
         Ok(stream) => {
             let t_build = t0.elapsed();
             if let Err(e) = stream.play() {
@@ -1682,6 +1674,7 @@ pub fn voice_buffer_record_start(state: State<AppState>) -> OkResponse {
     *lock_or_recover(&state.active_recording) = Some(crate::recorder::ActiveRecording {
         filename: filename.clone(),
         started_at,
+        history_epoch: crate::voice_buffer::history_epoch(&dir),
         worker,
     });
     debug!("[record] Started record-only session: {filename}");
@@ -1732,13 +1725,14 @@ pub async fn voice_buffer_record_stop(
         let final_path = dir.join(&active.filename);
         std::fs::rename(&partial_path, &final_path)
             .map_err(|e| format!("Failed to finalize recording: {e}"))?;
-        crate::voice_buffer::register_recording(
+        crate::voice_buffer::register_recording_at_epoch(
             &dir,
             &active.filename,
             active.started_at.to_rfc3339(),
             finished.duration_secs,
             finished.size_bytes,
             Some(max_size),
+            active.history_epoch,
         )
     })
     .await
