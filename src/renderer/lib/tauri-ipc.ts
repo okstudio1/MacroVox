@@ -143,6 +143,18 @@ export const stopRecording = (credential: DeepgramCredential): Promise<Recording
 export const cancelRecording = (): Promise<OkResult> =>
   invoke('recording_cancel')
 
+// ── Updates ───────────────────────────────────────────────────────────────────
+
+/**
+ * Downloads the pending update, verifies the installer against MacroVox's
+ * code-signing certificate, then installs it.
+ *
+ * On success the backend launches the installer and exits, so this promise
+ * normally never resolves. A resolved result always describes a failure.
+ */
+export const installUpdate = (): Promise<OkResult> =>
+  invoke('updater_install')
+
 // ── Clipboard & auto-paste ────────────────────────────────────────────────────
 
 export const copyToClipboard = (text: string): Promise<OkResult> =>

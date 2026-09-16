@@ -965,6 +965,85 @@ pub fn recording_cancel(state: State<AppState>) -> OkResponse {
     OkResponse::ok()
 }
 
+// ── Updates ───────────────────────────────────────────────────────────────────
+
+/// Downloads the pending update, checks the installer against our code-signing
+/// certificate, and only then hands it to the updater plugin.
+///
+/// The plugin verifies a minisign signature inside `download` and nothing at
+/// all inside `install`, so this command exists to put a second, independent
+/// gate in that gap: see `update_guard`.
+///
+/// On success this process does not return. `install` launches the installer
+/// and exits, so any response the renderer actually receives is a failure and
+/// the transcript-style fallback applies: the user can download the installer
+/// themselves.
+#[tauri::command]
+pub async fn updater_install(app: AppHandle) -> OkResponse {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(e) => {
+            warn!("[updater] unavailable: {e}");
+            return OkResponse::err(format!("Updater unavailable: {e}"));
+        }
+    };
+
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => return OkResponse::err("No update is available"),
+        Err(e) => {
+            warn!("[updater] check failed: {e}");
+            return OkResponse::err(format!("Update check failed: {e}"));
+        }
+    };
+
+    // `download` returns bytes whose minisign signature has already been
+    // verified against the key compiled into this binary.
+    let bytes = match update.download(|_, _| {}, || {}).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("[updater] download failed: {e}");
+            return OkResponse::err(format!("Update download failed: {e}"));
+        }
+    };
+
+    // Authenticode is checked against a file, so the verified bytes are staged
+    // on disk for the query and removed again immediately. The bytes handed to
+    // `install` are the same buffer that was verified here.
+    let staged = std::env::temp_dir().join(format!(
+        "macrovox-{}-update-{}.exe",
+        update.version,
+        std::process::id()
+    ));
+    if let Err(e) = std::fs::write(&staged, &bytes) {
+        warn!("[updater] could not stage the installer: {e}");
+        return OkResponse::err(format!("Could not stage the installer: {e}"));
+    }
+    let verdict = crate::update_guard::verify_installer(&staged, &update.version);
+    let _ = std::fs::remove_file(&staged);
+
+    if let Err(reason) = verdict {
+        warn!("[updater] refused {}: {reason}", update.version);
+        return OkResponse::err(format!(
+            "This update was refused because {reason}. Nothing was installed."
+        ));
+    }
+
+    info!(
+        "[updater] installing {} after signature checks",
+        update.version
+    );
+    match update.install(bytes) {
+        Ok(()) => OkResponse::ok(),
+        Err(e) => {
+            warn!("[updater] install failed: {e}");
+            OkResponse::err(format!("Update install failed: {e}"))
+        }
+    }
+}
+
 // ── Clipboard ✅ Phase 2 ───────────────────────────────────────────────────────
 
 #[tauri::command]

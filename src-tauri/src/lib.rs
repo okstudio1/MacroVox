@@ -4,6 +4,7 @@ mod deepgram_ws;
 mod platform;
 mod recorder;
 mod state;
+mod update_guard;
 mod voice_buffer;
 
 use commands::*;
@@ -159,6 +160,8 @@ pub fn run() {
             recording_start,
             recording_stop,
             recording_cancel,
+            // Updates
+            updater_install,
             // Clipboard & auto-paste
             clipboard_write,
             dictation_auto_paste,
