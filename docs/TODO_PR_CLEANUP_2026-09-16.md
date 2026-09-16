@@ -31,6 +31,17 @@ Closed as superseded: #24, #14, #13, #12, #11, #10, #9, #8, #7, #6, #5,
 
 ## Verify on main before the release
 
+- [ ] **A real signed installer must pass the new Authenticode pins.** #37 made
+      installs go through `updater_install`, which refuses anything whose
+      signature status, certificate thumbprint, signer name or embedded
+      `FileVersion` does not match. None of that can be exercised without a
+      signed artifact on the update feed, so the first 1.0.10 build is the test:
+      publish it, then update a 1.0.9 client and confirm it installs rather than
+      reporting a refusal. A false refusal here blocks every future update, so
+      this outranks everything else on this list.
+      If it does refuse, the log line names which pin failed, and the pinned
+      values are in `src-tauri/src/update_guard.rs`.
+
 - [x] **enigo 0.6 auto-paste key injection. Tested 2026-09-16, passes.**
       Ran the exact `dictation_auto_paste` sequence (`Enigo::new(&Settings::default())`,
       then Control press, `Unicode('v')` click, Control release) against three
