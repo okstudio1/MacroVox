@@ -212,16 +212,42 @@ pub struct DeepgramStartResponse {
 
 // ── Audio ✅ Phase 3: cpal WASAPI native capture ───────────────────────────────
 
+/// The label MacroVox shows for an input device and persists as the chosen
+/// microphone.
+///
+/// cpal 0.17 replaced `Device::name` with a `DeviceDescription`. On WASAPI the
+/// endpoint lands in `name` and the adapter in `driver`, so `name` alone is
+/// neither stable nor unique: a machine with three microphones reports
+/// "Microphone" three times, and every name a user has already saved stops
+/// matching, which silently falls back to the default device. Recombining the
+/// two fields reproduces the 0.15 string exactly, so saved choices keep
+/// working and the picker stays unambiguous. Platforms that leave `driver`
+/// empty fall back to the bare name.
+fn device_label(device: &cpal::Device) -> Option<String> {
+    use cpal::traits::DeviceTrait;
+    let description = device.description().ok()?;
+    Some(format_device_label(
+        description.name(),
+        description.driver(),
+    ))
+}
+
+/// The label format itself, split out so it can be pinned by a test on a
+/// machine with no audio hardware.
+fn format_device_label(name: &str, driver: Option<&str>) -> String {
+    match driver {
+        Some(driver) if !driver.is_empty() => format!("{name} ({driver})"),
+        _ => name.to_string(),
+    }
+}
+
 #[tauri::command]
 pub fn audio_list_devices(state: State<AppState>) -> AudioDevicesResponse {
-    use cpal::traits::{DeviceTrait, HostTrait};
+    use cpal::traits::HostTrait;
     let host = cpal::default_host();
     let devices: Vec<String> = host
         .input_devices()
-        .map(|iter| {
-            iter.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
-                .collect()
-        })
+        .map(|iter| iter.filter_map(|d| device_label(&d)).collect())
         .unwrap_or_default();
     let devices = filter_device_list(devices);
     let selected = lock_or_recover(&state.selected_mic_device).clone();
@@ -325,14 +351,7 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
     let device = if let Some(ref name) = device_name {
         host.input_devices()
             .ok()
-            .and_then(|mut iter| {
-                iter.find(|d| {
-                    d.description()
-                        .ok()
-                        .map(|desc| desc.name() == name.as_str())
-                        .unwrap_or(false)
-                })
-            })
+            .and_then(|mut iter| iter.find(|d| device_label(d).as_deref() == Some(name.as_str())))
             .or_else(|| {
                 warn!(
                     "[audio] Device {:?} not found, falling back to default",
@@ -348,10 +367,7 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
         Some(d) => {
             debug!(
                 "[audio] Using device: {:?}",
-                d.description()
-                    .ok()
-                    .map(|desc| desc.name().to_string())
-                    .unwrap_or_default()
+                device_label(&d).unwrap_or_default()
             );
             d
         }
@@ -1627,6 +1643,32 @@ pub async fn voice_buffer_record_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_label_recombines_endpoint_and_adapter() {
+        // These are the exact strings cpal 0.15 returned from `Device::name`
+        // on WASAPI, which is what users already have saved as their
+        // microphone choice. cpal 0.17 splits them across two fields.
+        assert_eq!(
+            format_device_label("Microphone", Some("Shure MV7+")),
+            "Microphone (Shure MV7+)"
+        );
+        assert_eq!(
+            format_device_label("IN 1", Some("BEHRINGER UMC 404HD 192k")),
+            "IN 1 (BEHRINGER UMC 404HD 192k)"
+        );
+    }
+
+    #[test]
+    fn device_label_falls_back_to_the_bare_name() {
+        // Hosts that do not report an adapter, and the ALSA-style names the
+        // Linux picker filters on, must survive unchanged.
+        assert_eq!(format_device_label("default", None), "default");
+        assert_eq!(
+            format_device_label("hw:CARD=PCH,DEV=0", Some("")),
+            "hw:CARD=PCH,DEV=0"
+        );
+    }
 
     #[test]
     fn ok_response_success() {
