@@ -1,0 +1,71 @@
+# Advisories accepted for now, with a review date.
+#
+# Every entry below is an unmaintained-crate or unsoundness advisory with no
+# patched version reachable from this tree, and every one except audiopus_sys
+# belongs to Tauri's own dependency graph rather than ours. `cargo audit`
+# passes on this lockfile because it treats these classes as warnings;
+# osv-scanner treats them as findings, which is why they are listed here
+# rather than silently tolerated.
+#
+# `ignoreUntil` is a review date, not a judgement that the advisory stops
+# mattering then. When it passes, the scan fails again and these get another
+# look, ideally after a Tauri bump has moved the pinned versions.
+#
+# Do not add an entry to unblock a push without reading the advisory. A new
+# finding failing this gate is the gate working.
+
+# ── Tauri's tree: build-time and platform dependencies we cannot move ────────
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0097"
+ignoreUntil = 2027-03-31
+reason = "rand 0.7.3, unsound when a custom logger calls rand::rng(). Reached only as a build dependency: phf_generator 0.8 -> phf_codegen, inside the Tauri dependency graph. MacroVox does not call rand at runtime and cannot move this pin without an upstream Tauri bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2027-03-31
+reason = "glib 0.18.5, unsoundness in the VariantStrIter iterator impls. Linux only, reached through atk and cairo-rs from gtk 0.18.2, which tauri 2.11 pins. MacroVox does not construct VariantStrIter."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2027-03-31
+reason = "proc-macro-error 1.0.4 is unmaintained. Build-time proc-macro helper inside the Tauri graph, not present in the shipped binary."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+ignoreUntil = 2027-03-31
+reason = "fxhash 0.2.1 is unmaintained. Reached through selectors 0.24 -> kuchikiki, the HTML parser Tauri uses."
+
+# ── unic-*: one unmaintained family, all via urlpattern -> tauri-utils ───────
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2027-03-31
+reason = "unic-char-range 0.9.0 is unmaintained. Reached through urlpattern 0.3 -> tauri-utils."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2027-03-31
+reason = "unic-common 0.9.0 is unmaintained. Reached through urlpattern 0.3 -> tauri-utils."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2027-03-31
+reason = "unic-char-property 0.9.0 is unmaintained. Reached through urlpattern 0.3 -> tauri-utils."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2027-03-31
+reason = "unic-ucd-version 0.9.0 is unmaintained. Reached through urlpattern 0.3 -> tauri-utils."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2027-03-31
+reason = "unic-ucd-ident 0.9.0 is unmaintained. Reached through urlpattern 0.3 -> tauri-utils."
+
+# ── Ours, and therefore the one to watch ─────────────────────────────────────
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0150"
+ignoreUntil = 2027-03-31
+reason = "audiopus_sys 0.1.8 is unmaintained. This is the only entry here that is our own choice rather than Tauri's: it comes from audiopus 0.2, which MacroVox depends on directly and ogg-opus also pulls in, for the Opus encoder behind voice-buffer recording. Revisit first, since replacing it is within our control."

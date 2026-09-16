@@ -139,11 +139,12 @@ jobs:
   # and it reads the lockfiles directly rather than a package manager's own
   # view of them.
   #
-  # fail-on-vuln stays true. If an advisory lands that genuinely cannot be
-  # fixed before the next push (a transitive crate pinned by the Tauri
-  # dependency tree, for instance), quarantine that single ID in an
-  # `osv-scanner.toml` ignore entry with an expiry, rather than turning the
-  # gate off for everything.
+  # fail-on-vuln stays true. Advisories that cannot be fixed are quarantined
+  # per ID in `osv-scanner.toml`, each with a reason and a review date, rather
+  # than by turning the gate off. That file starts with ten RUSTSEC entries
+  # that `cargo audit` treats as warnings: unmaintained crates and two
+  # unsoundness advisories, all but one of them inside Tauri's own dependency
+  # graph with no reachable patched version.
   #
   # supabase/deno.lock is deliberately absent: osv-scanner 2.6.0 has no
   # extractor for it and aborts the entire scan rather than skipping the file,
@@ -165,6 +166,7 @@ jobs:
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
     with:
       scan-args: |-
+        --config=osv-scanner.toml
         --lockfile=package-lock.json
         --lockfile=src-tauri/Cargo.lock
       fail-on-vuln: true

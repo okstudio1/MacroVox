@@ -48,10 +48,16 @@
   updates), the plugin's own write-then-execute window, and no download size
   bound. Seven tests cover the states the UI depends on.
 - **OSV joins the CVE gates in CI.** `google/osv-scanner-action` v2.6.0 scans
-  `package-lock.json`, `src-tauri/Cargo.lock` and `supabase/deno.lock`
-  alongside the existing `npm audit` and `cargo audit`. Unfixable advisories
-  should be quarantined per-ID in an `osv-scanner.toml` rather than by
-  disabling the gate.
+  `package-lock.json` and `src-tauri/Cargo.lock` alongside the existing
+  `npm audit` and `cargo audit`. `supabase/deno.lock` is excluded because
+  osv-scanner 2.6.0 has no extractor for it and aborts the whole scan rather
+  than skipping the file, so those Deno imports are not CVE-scanned.
+  Its first run surfaced ten RUSTSEC advisories that `cargo audit` reports
+  only as warnings: eight unmaintained crates and two unsoundness advisories.
+  None has a patched version reachable from this tree and all but
+  `audiopus_sys` sit inside Tauri's own dependency graph, so each is
+  quarantined by ID in `osv-scanner.toml` with a reason, the dependency path,
+  and a 2027-03-31 review date. New findings still fail the build.
 - **Auto-paste reports injection failures instead of swallowing them.** The
   three `enigo` calls discarded their results, so a failed injection was
   indistinguishable from a target application that ignored the paste, and the
