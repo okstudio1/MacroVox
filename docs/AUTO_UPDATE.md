@@ -113,6 +113,15 @@ four pins is shown to refuse a bad installer, a quoted path is refused before
 any query runs, and a query that fails refuses rather than installing. The
 version comparison rejects anything it cannot parse rather than guessing.
 
+The version comparison takes the leading digits of each component, so a
+pre-release tag such as `1.1.0-rc1` still compares as 1.1.0. Refusing a
+legitimate pre-release would strand every client on it, which is worse than
+comparing only the numeric core. Tauri's NSIS template writes this value from
+the crate version (`VIAddVersionKey "FileVersion"` alongside
+`VIProductVersion`), so the field is present on installers it builds. An
+installer built by some other toolchain may carry no version resource at all,
+in which case this pin refuses it.
+
 One test is ignored by default and needs the signing host:
 `a_real_signed_installer_satisfies_every_pin` runs the real query against a
 real artifact when `MACROVOX_INSTALLER` is set. It is a step in
