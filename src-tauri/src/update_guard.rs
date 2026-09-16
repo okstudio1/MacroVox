@@ -15,7 +15,6 @@
 //! signature remains the only gate, which is documented in
 //! `docs/AUTO_UPDATE.md`.
 
-#[cfg(target_os = "windows")]
 use log::debug;
 #[cfg(not(target_os = "windows"))]
 use log::warn;
@@ -130,25 +129,18 @@ pub(crate) fn parse_signature_line(line: &str) -> Result<SignatureFacts, String>
     Ok(facts)
 }
 
-/// Verifies that the installer at `path` is ours and carries `expected_version`.
+/// Asks Windows what it knows about the file, as one delimited line.
 ///
-/// Returns `Ok(())` only when every pin holds.
+/// Kept separate from the checking so the pins can be exercised against
+/// crafted output without a signed artifact, and so the only thing that needs
+/// a real installer is this function.
 #[cfg(target_os = "windows")]
-pub(crate) fn verify_installer(
-    path: &std::path::Path,
-    expected_version: &str,
-) -> Result<(), String> {
+fn query_signature(path: &std::path::Path) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let path_str = path.to_str().ok_or("installer path is not valid UTF-8")?;
-    // The script embeds the path in single quotes. A quote in the path would
-    // break out of that literal, so refuse instead of trying to escape it.
-    if path_str.contains('\'') {
-        return Err("installer path contains a quote".to_string());
-    }
-
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
     let powershell = format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
 
@@ -173,18 +165,53 @@ pub(crate) fn verify_installer(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
+    stdout
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .ok_or("signature check produced no output")?;
+        .map(str::to_string)
+        .ok_or_else(|| "signature check produced no output".to_string())
+}
 
-    let facts = parse_signature_line(line)?;
+/// The whole gate: guard the path, ask `query` about the file, parse the
+/// answer, and apply every pin.
+///
+/// `query` is what tests replace.
+pub(crate) fn verify_with<F>(
+    path: &std::path::Path,
+    expected_version: &str,
+    query: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&std::path::Path) -> Result<String, String>,
+{
+    let path_str = path.to_str().ok_or("installer path is not valid UTF-8")?;
+    // The query embeds the path in a single-quoted PowerShell literal. A quote
+    // in the path would break out of it, so refuse rather than escape: this
+    // path is one we chose ourselves, so a quote in it means something is
+    // wrong, not that we should be clever.
+    if path_str.contains('\'') {
+        return Err("installer path contains a quote".to_string());
+    }
+
+    let line = query(path)?;
+    let facts = parse_signature_line(&line)?;
     debug!(
         "[update-guard] installer reports status={} version={}",
         facts.status, facts.file_version
     );
     check_facts(&facts, expected_version)
+}
+
+/// Verifies that the installer at `path` is ours and carries `expected_version`.
+///
+/// Returns `Ok(())` only when every pin holds.
+#[cfg(target_os = "windows")]
+pub(crate) fn verify_installer(
+    path: &std::path::Path,
+    expected_version: &str,
+) -> Result<(), String> {
+    verify_with(path, expected_version, query_signature)
 }
 
 /// No Authenticode outside Windows, so the minisign signature stands alone.
@@ -200,6 +227,7 @@ pub(crate) fn verify_installer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn common_name_is_taken_from_a_full_subject() {
@@ -279,6 +307,141 @@ mod tests {
         facts.file_version = "1.0.8.0".to_string();
         let err = check_facts(&facts, "1.0.9").unwrap_err();
         assert!(err.contains("1.0.8"), "{err}");
+    }
+
+    /// A crafted query response, the way the sibling project fakes its
+    /// PowerShell output.
+    fn reply(status: &str, thumbprint: &str, cn: &str, file_version: &str) -> String {
+        format!("{status}|{thumbprint}|CN={cn}, O={cn}, C=US|{file_version}\n")
+    }
+
+    #[test]
+    fn the_whole_gate_accepts_our_own_installer() {
+        let ok = verify_with(Path::new("C:/tmp/setup.exe"), "1.0.9", |_| {
+            Ok(reply(
+                "Valid",
+                &EV_CERT_SHA1_THUMBPRINT.to_uppercase(),
+                EXPECTED_SIGNER_CN,
+                "1.0.9.0",
+            ))
+        });
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn the_whole_gate_refuses_each_broken_pin() {
+        let cases: [(&str, String); 4] = [
+            (
+                "status",
+                reply(
+                    "NotSigned",
+                    &EV_CERT_SHA1_THUMBPRINT.to_uppercase(),
+                    EXPECTED_SIGNER_CN,
+                    "1.0.9.0",
+                ),
+            ),
+            (
+                "thumbprint",
+                reply(
+                    "Valid",
+                    "0000000000000000000000000000000000000000",
+                    EXPECTED_SIGNER_CN,
+                    "1.0.9.0",
+                ),
+            ),
+            (
+                "signer",
+                reply(
+                    "Valid",
+                    &EV_CERT_SHA1_THUMBPRINT.to_uppercase(),
+                    "Someone Else",
+                    "1.0.9.0",
+                ),
+            ),
+            (
+                "version",
+                reply(
+                    "Valid",
+                    &EV_CERT_SHA1_THUMBPRINT.to_uppercase(),
+                    EXPECTED_SIGNER_CN,
+                    "1.0.8.0",
+                ),
+            ),
+        ];
+        for (pin, response) in cases {
+            let verdict = verify_with(Path::new("C:/tmp/setup.exe"), "1.0.9", |_| {
+                Ok(response.clone())
+            });
+            assert!(
+                verdict.is_err(),
+                "the {pin} pin let a bad installer through"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gate_refuses_a_quoted_path_without_querying() {
+        // A quote would break out of the single-quoted PowerShell literal, so
+        // the path is refused before any query runs.
+        let mut queried = false;
+        let verdict = verify_with(Path::new("C:/tmp/it's here/setup.exe"), "1.0.9", |_| {
+            queried = true;
+            Ok(reply(
+                "Valid",
+                &EV_CERT_SHA1_THUMBPRINT.to_uppercase(),
+                EXPECTED_SIGNER_CN,
+                "1.0.9.0",
+            ))
+        });
+        assert!(verdict.is_err());
+        assert!(
+            !queried,
+            "the query ran on a path that should have been refused"
+        );
+    }
+
+    #[test]
+    fn a_failing_query_refuses_rather_than_installing() {
+        let verdict = verify_with(Path::new("C:/tmp/setup.exe"), "1.0.9", |_| {
+            Err("powershell is not available".to_string())
+        });
+        let err = verdict.unwrap_err();
+        assert!(err.contains("powershell"), "{err}");
+    }
+
+    /// Runs every pin against a real, EV-signed installer. Ignored by default
+    /// because it needs an artifact that only the signing host has.
+    ///
+    /// ```text
+    /// $env:MACROVOX_INSTALLER = "path\to\MacroVox_1.0.9_x64-setup.exe"
+    /// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture real_signed_installer
+    /// ```
+    ///
+    /// This is the one check that cannot be faked, and the one that matters:
+    /// the pins ship inside a release but are only exercised when that release
+    /// installs the *next* one, so a wrong pin strands every client until they
+    /// reinstall by hand. `MACROVOX_INSTALLER_VERSION` overrides the expected
+    /// version, which otherwise comes from this crate's own version.
+    #[test]
+    #[ignore = "needs a signed installer: set MACROVOX_INSTALLER"]
+    #[cfg(target_os = "windows")]
+    fn a_real_signed_installer_satisfies_every_pin() {
+        let installer = std::env::var("MACROVOX_INSTALLER")
+            .expect("set MACROVOX_INSTALLER to the signed installer path");
+        let expected = std::env::var("MACROVOX_INSTALLER_VERSION")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let path = Path::new(&installer);
+        assert!(path.is_file(), "no installer at {installer}");
+
+        let line =
+            query_signature(path).unwrap_or_else(|e| panic!("could not query {installer}: {e}"));
+        // Printed first so a failure names the fact that broke the pin.
+        println!("query response: {line}");
+        let facts = parse_signature_line(&line).expect("the query response should parse");
+        println!("{facts:#?}");
+        println!("expected version: {expected}");
+
+        check_facts(&facts, &expected).expect("every pin must hold for a real release installer");
     }
 
     #[test]

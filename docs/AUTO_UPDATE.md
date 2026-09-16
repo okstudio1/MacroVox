@@ -107,10 +107,18 @@ refusal from the signature check reaching the user, and a failed install call,
 which must clear the in-progress flag.
 
 [update_guard.rs](../src-tauri/src/update_guard.rs) carries its own tests for
-the pins, which run without any signing infrastructure: a correct set of facts
-passes, an invalid status is refused, another publisher's valid signature is
-refused, a relabelled older installer is refused, and the version comparison
-rejects anything it cannot parse rather than guessing.
+the pins, which run without any signing infrastructure because the signature
+query is injectable: a crafted response exercises the whole gate, each of the
+four pins is shown to refuse a bad installer, a quoted path is refused before
+any query runs, and a query that fails refuses rather than installing. The
+version comparison rejects anything it cannot parse rather than guessing.
+
+One test is ignored by default and needs the signing host:
+`a_real_signed_installer_satisfies_every_pin` runs the real query against a
+real artifact when `MACROVOX_INSTALLER` is set. It is a step in
+[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md), because the pins ship inside a
+release and are only exercised when that release installs the next one. A
+wrong pin is therefore invisible until it has already stranded every client.
 
 The minisign verification itself belongs to the plugin and is not re-tested
 here.
