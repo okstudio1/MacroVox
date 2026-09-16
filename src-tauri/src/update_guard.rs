@@ -70,7 +70,18 @@ pub(crate) fn file_version_matches(file_version: &str, expected: &str) -> bool {
         let mut parts = value.trim().split('.');
         let mut out = [0u64; 3];
         for slot in out.iter_mut() {
-            *slot = parts.next()?.trim().parse::<u64>().ok()?;
+            // Take the leading digits of each component so a pre-release like
+            // "1.1.0-rc1" still compares as 1.1.0. Refusing a legitimate
+            // pre-release update would strand every client on it, which is a
+            // worse outcome than comparing only the numeric core. A component
+            // with no leading digit is still rejected.
+            let digits: String = parts
+                .next()?
+                .trim()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            *slot = digits.parse::<u64>().ok()?;
         }
         Some(out)
     }
@@ -251,6 +262,15 @@ mod tests {
         assert!(file_version_matches("1.0.9", "1.0.9"));
         assert!(!file_version_matches("1.0.8.0", "1.0.9"));
         assert!(!file_version_matches("2.0.9.0", "1.0.9"));
+    }
+
+    #[test]
+    fn file_version_tolerates_a_pre_release_suffix() {
+        // Tauri writes VIAddVersionKey "FileVersion" from the crate version,
+        // so a pre-release tag would otherwise refuse its own update.
+        assert!(file_version_matches("1.1.0-rc1", "1.1.0"));
+        assert!(file_version_matches("1.1.0.0", "1.1.0-rc1"));
+        assert!(!file_version_matches("1.1.0-rc1", "1.1.1"));
     }
 
     #[test]
