@@ -38,10 +38,6 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["sync", "macros", "rt", "time", "io-util", "net"] }
 
-# Phase 4: local STT option (off by default — requires cmake + model download)
-# Enable with: cargo build --features local-stt
-whisper-rs = { version = "0.10", optional = true }
-
 # Phase 5: replace PowerShell SendKeys paste (~700ms) with native input
 enigo = "0.2"
 
@@ -65,4 +61,3 @@ env_logger = "0.11"
 
 [features]
 default = []
-local-stt = ["dep:whisper-rs"]

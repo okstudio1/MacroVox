@@ -143,19 +143,6 @@ export const stopRecording = (credential: DeepgramCredential): Promise<Recording
 export const cancelRecording = (): Promise<OkResult> =>
   invoke('recording_cancel')
 
-// ── Local STT (whisper-rs, local-stt feature) ─────────────────────────────────
-
-/**
- * Transcribes the current recording buffer using local whisper-rs (offline STT).
- * Call after `startRecording()` + user speaks, as an alternative to `stopRecording`.
- *
- * Requires the Tauri backend to be compiled with `--features local-stt` and a
- * GGML model file downloaded to `modelPath` (e.g. `ggml-base.en.bin`).
- * Returns `{ success: false, error: "local-stt feature not enabled" }` otherwise.
- */
-export const whisperTranscribe = (modelPath: string): Promise<RecordingStopResult> =>
-  invoke('whisper_transcribe', { modelPath })
-
 // ── Clipboard & auto-paste ────────────────────────────────────────────────────
 
 export const copyToClipboard = (text: string): Promise<OkResult> =>

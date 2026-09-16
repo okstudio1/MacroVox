@@ -23,7 +23,7 @@ MacroVox uses Tauri 2 with a Rust native process and two React webviews. `main` 
 
 A native command must appear both in `commands.rs` and `tauri::generate_handler!` in `lib.rs`, with a matching typed bridge export. JavaScript argument names use camelCase and native names use snake_case. Keep optional fields and serialized event names synchronized.
 
-The main command families are audio device/capture, streaming start/stop, batch start/stop/cancel, optional Whisper, clipboard/paste, window/settings/theme, global shortcut, platform information, and history list/info/playback/save/delete/clear/reprocess/update.
+The main command families are audio device/capture, streaming start/stop, batch start/stop/cancel, clipboard/paste, window/settings/theme, global shortcut, platform information, and history list/info/playback/save/delete/clear/reprocess/update.
 
 Most simple mutations return `{ success, error? }`. A resolved promise is not proof of success. Clipboard and history callers must inspect `success` before displaying success, removing a row, or pasting.
 
@@ -61,15 +61,6 @@ names). No-op on Windows/macOS.
 | `deepgram_stop` | `stopDeepgram()` | `OkResponse` |
 
 Push event emitted by backend → renderer: `"deepgram:transcript"` `{ transcript: string, isFinal: boolean }`
-
-### Local STT (whisper-rs)
-
-| Command | JS equivalent | Returns |
-|---|---|---|
-| `whisper_transcribe(model_path)` | `whisperTranscribe(path)` | `RecordingStopResponse` |
-
-Requires `--features local-stt` build flag and a downloaded GGML model file.
-Returns `{ success: false, error: "local-stt feature not enabled" }` in default builds.
 
 ### Buffered recording
 
@@ -220,8 +211,6 @@ Batch Stop closes the microphone before credential acquisition or upload. The co
 Retained PCM is limited by five minutes of the actual device format and a 128 MiB sample-data ceiling, rounded to whole channel frames. This replaces the old fixed sample count that held only 50 seconds at 48 kHz stereo. A 60-second 48 kHz stereo recording fits. Reaching the cap sets `limitReached`; it is not silently reported as complete. Disabling the UI cutoff does not remove native storage bounds.
 
 BYOK uses Deepgram Token authentication. Native commands also accept optional lowercase `bearer` authentication for short-lived managed grants. Omitted auth scheme defaults to Token for existing BYOK callers. Streaming, batch, and history reprocessing must all use the same credential convention. Nova-3 keyword boosting uses `keyterm`, not the older `keywords` query parameter.
-
-Whisper remains behind the `local-stt` Cargo feature and requires a separately supplied model. Default tests do not validate that optional model runtime.
 
 ## History transactions and deletion
 
