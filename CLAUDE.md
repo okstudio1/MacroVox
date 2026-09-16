@@ -8,7 +8,7 @@ The two configured webviews are `main` (dictation.html) and `settings` (settings
 
 Read [src-tauri/ARCHITECTURE.md](src-tauri/ARCHITECTURE.md) for native ownership, session finalization, history persistence, and event contracts. `commands.rs` defines commands, `lib.rs` registers them, and `src/renderer/lib/tauri-ipc.ts` defines their TypeScript bridge. Change these together when an IPC contract changes.
 
-`DictationMode.tsx` owns the live recording flow. The standalone `useDeepgram` hook and the deferred Write tab are not its implementation. `useUpdater` is mounted through `UpdateNotice` in the dictation webview.
+`DictationMode.tsx` owns the live recording flow. The standalone `useDeepgram` hook and the deferred Write tab are not its implementation. `useUpdater` is mounted through `UpdateNotice` in the dictation webview and again by the Updates section of `SettingsPanel`; the two webviews check independently. [docs/AUTO_UPDATE.md](docs/AUTO_UPDATE.md) records what the update path verifies and what it does not.
 
 ## Commands and checks
 

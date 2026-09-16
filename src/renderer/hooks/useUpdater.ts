@@ -9,6 +9,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
+import { getVersion } from '@tauri-apps/api/app'
 
 /** Reactive state surfaced by `useUpdater` for the update-prompt UI. */
 interface UpdateState {
@@ -22,6 +23,10 @@ interface UpdateState {
   version: string | null
   /** Last error message from `check()` or `downloadAndInstall()`. */
   error: string | null
+  /** A check has completed without error, so `available` is meaningful. */
+  checked: boolean
+  /** Version of the running build, for display next to the check control. */
+  currentVersion: string | null
 }
 
 export function useUpdater() {
@@ -31,7 +36,25 @@ export function useUpdater() {
     downloading: false,
     version: null,
     error: null,
+    checked: false,
+    currentVersion: null,
   })
+
+  // The running version is shown beside the check control, so a user can tell
+  // what they have without hunting for it.
+  useEffect(() => {
+    let cancelled = false
+    getVersion()
+      .then(version => {
+        if (!cancelled) setState(prev => ({ ...prev, currentVersion: version }))
+      })
+      .catch(err => {
+        console.warn('[Updater] Could not read the app version:', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const checkForUpdate = useCallback(async () => {
     setState(prev => ({ ...prev, checking: true, error: null }))
@@ -43,14 +66,26 @@ export function useUpdater() {
           checking: false,
           available: true,
           version: update.version,
+          checked: true,
         }))
         return update
       }
-      setState(prev => ({ ...prev, checking: false }))
+      setState(prev => ({
+        ...prev,
+        checking: false,
+        available: false,
+        version: null,
+        checked: true,
+      }))
       return null
     } catch (err) {
       console.warn('[Updater] Check failed:', err)
-      setState(prev => ({ ...prev, checking: false, error: String(err) }))
+      setState(prev => ({
+        ...prev,
+        checking: false,
+        error: String(err),
+        checked: false,
+      }))
       return null
     }
   }, [])

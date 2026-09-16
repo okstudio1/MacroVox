@@ -23,10 +23,11 @@
  */
 
 import { useState, useEffect } from 'react'
-import { Settings, Mic, X, RefreshCw, Sparkles, Loader2, CreditCard, MessageSquare, Pin, Palette, LogIn, User, HardDrive, Trash2, FolderOpen, KeyRound, Eye, EyeOff } from 'lucide-react'
+import { Settings, Mic, X, RefreshCw, Download, Sparkles, Loader2, CreditCard, MessageSquare, Pin, Palette, LogIn, User, HardDrive, Trash2, FolderOpen, KeyRound, Eye, EyeOff } from 'lucide-react'
 import { THEMES, getStoredTheme, setStoredTheme } from '../themes'
 import { VoiceHistory } from './VoiceHistory'
 import * as ipc from '../lib/tauri-ipc'
+import { useUpdater } from '../hooks/useUpdater'
 import type { AppUser } from '../lib/tauri-ipc'
 import * as auth from '../lib/auth'
 
@@ -43,7 +44,14 @@ interface SettingsPanelProps {
 
 type SubscriptionStatus = 'free' | 'pro' | 'team' | 'loading'
 
-type SettingsCategory = 'account' | 'apikeys' | 'dictation' | 'window' | 'history' | 'appearance'
+type SettingsCategory =
+  | 'account'
+  | 'apikeys'
+  | 'dictation'
+  | 'window'
+  | 'history'
+  | 'appearance'
+  | 'updates'
 
 const NAV_ITEMS: { id: SettingsCategory; label: string; Icon: typeof User }[] = [
   { id: 'account', label: 'Account', Icon: User },
@@ -52,9 +60,23 @@ const NAV_ITEMS: { id: SettingsCategory; label: string; Icon: typeof User }[] = 
   { id: 'window', label: 'Window', Icon: Pin },
   { id: 'history', label: 'History', Icon: HardDrive },
   { id: 'appearance', label: 'Appearance', Icon: Palette },
+  { id: 'updates', label: 'Updates', Icon: RefreshCw },
 ]
 
 export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: SettingsPanelProps) {
+  // Update state for the Updates section. This is a second webview, so its
+  // own startup check is independent of the one the dictation HUD runs.
+  const {
+    checking: updateChecking,
+    available: updateAvailable,
+    downloading: updateDownloading,
+    version: updateVersion,
+    error: updateError,
+    checked: updateChecked,
+    currentVersion,
+    checkForUpdate,
+    downloadAndInstall,
+  } = useUpdater()
   const [authTab, setAuthTab] = useState<'signin' | 'signup'>('signin')
   const [authEmail, setAuthEmail] = useState('')
   const [authPassword, setAuthPassword] = useState('')
@@ -1157,6 +1179,56 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                   <kbd className="px-2 py-0.5 rounded font-mono" style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--accent-hover)' }}>{globalHotkey}</kbd>
                 </div>
               </div>
+            </div>
+          </section>
+          )}
+
+          {category === 'updates' && (
+          <section>
+            <h3 className="text-sm font-semibold flex items-center gap-2 mb-3 uppercase tracking-wider" style={{ color: 'var(--accent-primary)' }}>
+              <RefreshCw size={14} />
+              Updates
+            </h3>
+            <div className="rounded p-3 space-y-3" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate-400">Installed version</span>
+                <span className="font-mono" style={{ color: 'var(--accent-hover)' }}>{currentVersion ?? 'unknown'}</span>
+              </div>
+              <p className="text-xs text-slate-400">
+                MacroVox checks for updates shortly after launch. Downloads are verified
+                against the signing key built into this app before anything is installed.
+              </p>
+              <button
+                onClick={() => { void checkForUpdate() }}
+                disabled={updateChecking || updateDownloading}
+                className="w-full py-2 text-white text-sm rounded flex items-center justify-center gap-2 font-medium tracking-wide disabled:opacity-50"
+                style={{ backgroundColor: 'var(--accent-primary)' }}
+              >
+                <RefreshCw size={14} className={updateChecking ? 'animate-spin' : ''} />
+                {updateChecking ? 'Checking...' : 'Check for updates'}
+              </button>
+              {updateAvailable && (
+                <>
+                  <p className="text-xs" style={{ color: 'var(--accent-primary)' }}>
+                    Version {updateVersion} is available.
+                  </p>
+                  <button
+                    onClick={() => { void downloadAndInstall() }}
+                    disabled={updateDownloading}
+                    className="w-full py-2 text-white text-sm rounded flex items-center justify-center gap-2 font-medium tracking-wide disabled:opacity-50"
+                    style={{ backgroundColor: 'var(--accent-primary)' }}
+                  >
+                    <Download size={14} />
+                    {updateDownloading ? 'Installing, the app will restart...' : 'Install and restart'}
+                  </button>
+                </>
+              )}
+              {updateChecked && !updateAvailable && !updateChecking && (
+                <p className="text-xs text-slate-400">MacroVox is up to date.</p>
+              )}
+              {updateError && (
+                <p className="text-xs" style={{ color: 'var(--danger)' }}>{updateError}</p>
+              )}
             </div>
           </section>
           )}
