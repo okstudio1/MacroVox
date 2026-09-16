@@ -2,6 +2,55 @@
 
 ## Unreleased (1.0.9)
 
+### September 16 maintenance, dependency majors, and a removal
+
+- **Voice history no longer leaks audio it failed to delete.** When a Clear
+  landed mid-session, the stale-epoch branch of `register_recording_at_epoch`
+  discarded the `remove_file` error, leaving a finalized recording on disk with
+  no manifest entry: invisible in the UI, never retried by Clear, and not
+  counted against the size cap. The failure is now named in the error the
+  renderer receives, and a startup pass, `remove_orphan_recordings`, reclaims
+  unreferenced `.ogg`/`.wav` files as the durable retry. It skips `.partial`
+  files and anything modified in the last 60 seconds, so it cannot take a
+  recording that is still on its way into the manifest, and it also closes the
+  older leak where the process died between the rename and the registration.
+- **The `local-stt` feature and `whisper-rs` are removed.** The feature had not
+  compiled for some time: `whisper_transcribe_impl` built
+  `RecordingStopResponse` without the `session_id` and `limit_reached` fields
+  added to the struct later, and no CI job builds the feature, so the breakage
+  went unnoticed. Removing it also drops `whisper-rs-sys` and the vendored
+  whisper.cpp build, which was the only part of the tree that required cmake and
+  a C++ toolchain. The IPC contract goes from 32 commands to 31; the
+  `whisperTranscribe` bridge wrapper had no callers.
+- **Dependency majors: cpal 0.17, enigo 0.6.1, reqwest 0.13.2, lucide-react
+  1.14.0, @vitejs/plugin-react 5.2.0.** cpal 0.17 replaces `Device::name` with a
+  `DeviceDescription`; see the microphone label note below, because saved device
+  selections depend on that string. enigo 0.6.1 and reqwest 0.13.2 needed no
+  source changes. plugin-react stops at 5.2.0, the newest release whose peer
+  range still accepts Vite 6.
+- **Saved microphone selections survive the cpal 0.17 upgrade.** On WASAPI the
+  0.15 `Device::name` string is split across `DeviceDescription::name` (the
+  endpoint) and `::driver` (the adapter). Reading `name` alone would have
+  changed every persisted device string and collapsed distinct microphones onto
+  one label, silently falling back to the default device. `device_label`
+  recombines the two, which reproduces the old string exactly, so no migration
+  is needed. `format_device_label` carries the format and is covered by tests.
+- **Auto-paste verified against the new enigo.** The `dictation_auto_paste` key
+  sequence was exercised on a raw Win32 EDIT control, on the Windows 11 packaged
+  Notepad, and in a Chromium window, each confirmed by copying the target's
+  content back out rather than trusting the return values.
+- **Pinned GitHub Actions moved to current majors:** `checkout` v7.0.1,
+  `setup-node` v7.0.0, `setup-python` v7.0.0, `upload-artifact` v7.0.1. Every
+  SHA was verified against its upstream tag. These majors require Node 24 and
+  runner 2.327.1 or newer; all workflow jobs use GitHub-hosted runners.
+- **Chore:** the PowerShell module analysis cache (`/Microsoft/`) is ignored, so
+  it no longer appears in `git status`.
+
+Note for a future dependency sweep: `release.yml` still pins `ubuntu-22.04`,
+which began deprecation on 2026-09-17 and is unsupported from 2027-04-17. Moving
+it raises the glibc floor of the Linux `.deb` and AppImage, so it is a
+deliberate packaging decision rather than a routine bump.
+
 ### September 15 security and dictation fixes
 
 - Streaming Stop waits for the authoritative final transcript. Button, hotkey, and timer share session-aware stop behavior; microphone capture ends on stop or failure.

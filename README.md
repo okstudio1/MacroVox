@@ -148,12 +148,19 @@ python run.py
 
 `run.py` checks prerequisites, runs `npm install`, and launches `npx tauri dev`. The first run compiles the Rust backend, which takes a few minutes.
 
-For auth to work, create a `.env` in the project root:
+The renderer needs a `.env` **file** in the project root, copied from
+`.env.example`:
 
 ```
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_KEY=your-anon-key
 ```
+
+Both values are required. Without them the Supabase client throws while the
+renderer is still importing, React never mounts, and the window shows nothing
+but its background colour. If you get a black window, check `.env` first: it
+must be a file with both values set, and a *directory* named `.env` produces
+the same symptom, because Vite finds no env file and reports nothing.
 
 To develop against your own provider accounts instead, just paste your keys under Settings -> Keys.
 
