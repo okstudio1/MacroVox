@@ -23,7 +23,7 @@ MacroVox uses Tauri 2 with a Rust native process and two React webviews. `main` 
 
 A native command must appear both in `commands.rs` and `tauri::generate_handler!` in `lib.rs`, with a matching typed bridge export. JavaScript argument names use camelCase and native names use snake_case. Keep optional fields and serialized event names synchronized.
 
-The main command families are audio device/capture, streaming start/stop, batch start/stop/cancel, clipboard/paste, window/settings/theme, global shortcut, platform information, and history list/info/playback/save/delete/clear/reprocess/update.
+The main command families are audio device/capture, streaming start/stop, batch start/stop/cancel, verified update install, clipboard/paste, window/settings/theme, global shortcut, platform information, and history list/info/playback/save/delete/clear/reprocess/update.
 
 Most simple mutations return `{ success, error? }`. A resolved promise is not proof of success. Clipboard and history callers must inspect `success` before displaying success, removing a row, or pasting.
 
@@ -73,6 +73,22 @@ names). No-op on Windows/macOS.
 | `deepgram_stop` | `stopDeepgram()` | `OkResponse` |
 
 Push event emitted by backend → renderer: `"deepgram:transcript"` `{ transcript: string, isFinal: boolean }`
+
+### Updates
+
+| Command | JS equivalent | Returns |
+|---|---|---|
+| `updater_install` | `installUpdate()` | `OkResponse` |
+
+Checking for updates uses the updater plugin directly from the renderer.
+Installing does not. `Update::download` verifies the minisign signature and
+`Update::install` verifies nothing, so `updater_install` sits in that gap:
+it downloads, stages the verified bytes, and requires a valid Authenticode
+signature with the pinned certificate thumbprint, the pinned signer name, and
+a `FileVersion` matching the offered version before handing the same buffer to
+the plugin. A successful install never returns, because the plugin launches the
+installer and exits, so any response the renderer receives describes a failure.
+See `update_guard.rs` and [docs/AUTO_UPDATE.md](../docs/AUTO_UPDATE.md).
 
 ### Buffered recording
 

@@ -24,9 +24,17 @@ its README.
    the stream completes, verifies the minisign signature from the manifest
    against the public key compiled into the binary. A payload that fails
    verification is never returned to the caller.
-4. **Install.** `Update::install` writes those bytes to a temporary file and
-   hands it to `ShellExecuteW`, then the current process exits so the installer
-   can replace it. The renderer calls `relaunch()` afterwards.
+4. **Verify the installer.** Installing goes through the `updater_install`
+   command rather than the plugin's own `downloadAndInstall`, because the
+   plugin leaves no seam of its own: `download` verifies and `install` does
+   not. The command stages the verified bytes, and
+   [update_guard.rs](../src-tauri/src/update_guard.rs) requires a valid
+   Authenticode signature, our pinned certificate thumbprint, our signer name,
+   and a `FileVersion` matching the offered version. Any failure refuses the
+   update and installs nothing.
+5. **Install.** `Update::install` receives the same verified buffer, writes it
+   to a temporary file, hands that to `ShellExecuteW`, and the process exits so
+   the installer can replace it. The installer relaunches the app.
 
 ## What is verified
 
@@ -37,6 +45,8 @@ its README.
 | The update is not a downgrade | strict semver comparison against the running version, done before anything is downloaded |
 | The manifest cannot substitute a payload | the URL in the manifest is only a location; whatever it serves must still verify against the embedded pubkey |
 | The endpoint cannot be redirected by config | the endpoint list is compiled into the app, not read from disk at runtime |
+| The installer is ours, not just validly signed by someone | Authenticode status must be `Valid`, the signing certificate thumbprint and signer common name must match the pinned EV certificate |
+| A signed but older installer cannot be served as new | the `FileVersion` embedded in the installer must match the version the manifest offered, compared on the first three components |
 | Transport | HTTPS to github.com |
 
 The signing key is the operational dependency here. It lives on the signing
@@ -46,26 +56,28 @@ table.
 
 ## What is not verified, and why that matters
 
-**The installer's Authenticode signature is not checked by us.** The EV
-signature exists on shipped artifacts and Windows will evaluate it at
-execution, but MacroVox does not pin the certificate thumbprint or the signer
-name before running the installer. A leaked minisign key would therefore be
-sufficient on its own. Pinning it would mean taking over the download and
-install steps in Rust so a check can run between them, which is the one seam
-the plugin leaves open: `download` verifies, `install` verifies nothing and
-trusts whatever bytes it is handed.
+**We verify the bytes, not the file that is executed.** Authenticode is a
+property of a file, so the verified buffer is staged to a temporary file for
+the check. The plugin then writes its own temporary copy of the same buffer and
+executes that. The content is identical, so the pin is meaningful, but the file
+that runs is not the file that was inspected, and closing that gap means
+replicating the plugin's installer invocation rather than calling into it.
+
+**The check needs PowerShell, and fails closed without it.** The signature
+query runs `Get-AuthenticodeSignature` through an absolute path to
+`powershell.exe`, with no profile and no window. On a machine where PowerShell
+is missing or locked down, the update is refused rather than installed
+unverified. That is the right direction to fail, but it does mean such machines
+stop receiving updates silently apart from a log line.
+
+**There is no Authenticode outside Windows.** On Linux the minisign signature
+is the only gate, which is all the format offers.
 
 **The manifest itself is unsigned.** Only the artifact is. An attacker who
 could rewrite `latest.json` could point clients at a payload of their choosing,
 but could not make them install it, because the signature check would reject
 it. The practical effect of that attack is denial of updates, not code
 execution.
-
-**There is a window inside the plugin between write and execute.** `install`
-writes the verified bytes to a temporary path and then executes that path. We
-verify the bytes, not the file that ultimately runs. The window is short and
-the path is unpredictable, but anything with write access to that temp
-directory at that instant is outside what the signature check covers.
 
 **Nothing bounds the download size.** A hostile or broken endpoint can stream
 until memory is exhausted, because the plugin buffers the artifact in memory
@@ -90,7 +102,15 @@ before verifying it.
 [useUpdater.test.tsx](../src/renderer/hooks/__tests__/useUpdater.test.tsx)
 covers the states the UI depends on: an available update, a completed check
 with nothing newer, a failed check (which must not be reported as "up to
-date"), a successful install and relaunch, and a failed install, which must
-clear the in-progress flag and must not relaunch into a half-applied update.
+date"), an install that routes through the backend rather than the plugin, a
+refusal from the signature check reaching the user, and a failed install call,
+which must clear the in-progress flag.
 
-The verification itself belongs to the plugin and is not re-tested here.
+[update_guard.rs](../src-tauri/src/update_guard.rs) carries its own tests for
+the pins, which run without any signing infrastructure: a correct set of facts
+passes, an invalid status is refused, another publisher's valid signature is
+refused, a relabelled older installer is refused, and the version comparison
+rejects anything it cannot parse rather than guessing.
+
+The minisign verification itself belongs to the plugin and is not re-tested
+here.

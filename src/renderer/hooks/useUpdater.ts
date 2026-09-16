@@ -8,8 +8,8 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { check } from '@tauri-apps/plugin-updater'
-import { relaunch } from '@tauri-apps/plugin-process'
 import { getVersion } from '@tauri-apps/api/app'
+import * as ipc from '../lib/tauri-ipc'
 
 /** Reactive state surfaced by `useUpdater` for the update-prompt UI. */
 interface UpdateState {
@@ -93,16 +93,20 @@ export function useUpdater() {
   const downloadAndInstall = useCallback(async () => {
     setState(prev => ({ ...prev, downloading: true, error: null }))
     try {
-      const update = await check()
-      if (!update) {
-        setState(prev => ({ ...prev, downloading: false, available: false }))
+      // Installing goes through the backend rather than the plugin's own
+      // `downloadAndInstall`, so the installer's signature can be checked
+      // between download and execution. See src-tauri/src/update_guard.rs.
+      const result = await ipc.installUpdate()
+      if (result.success) {
+        // The installer is running and this process is on its way out. The
+        // downloading flag stays set so the UI does not flicker back.
         return
       }
-
-      await update.downloadAndInstall()
-      await relaunch()
+      const message = result.error ?? 'The update could not be installed.'
+      console.warn('[Updater] Install did not proceed:', message)
+      setState(prev => ({ ...prev, downloading: false, error: message }))
     } catch (err) {
-      console.warn('[Updater] Download failed:', err)
+      console.warn('[Updater] Install failed:', err)
       setState(prev => ({ ...prev, downloading: false, error: String(err) }))
     }
   }, [])

@@ -8,28 +8,30 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 
-const { mockCheck, mockRelaunch, mockGetVersion } = vi.hoisted(() => ({
+const { mockCheck, mockGetVersion, mockInstallUpdate } = vi.hoisted(() => ({
   mockCheck: vi.fn(),
-  mockRelaunch: vi.fn(),
   mockGetVersion: vi.fn(),
+  mockInstallUpdate: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/plugin-updater', () => ({ check: mockCheck }))
-vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: mockRelaunch }))
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: mockGetVersion }))
+// Installing goes through the backend so the installer's signature can be
+// checked between download and execution.
+vi.mock('../../lib/tauri-ipc', () => ({ installUpdate: mockInstallUpdate }))
 
 import { useUpdater } from '../useUpdater'
 
-/** A stand-in for the plugin's Update handle. */
-function updateHandle(version: string, install = vi.fn().mockResolvedValue(undefined)) {
-  return { version, downloadAndInstall: install }
+/** A stand-in for the plugin's Update handle, which only reports a version. */
+function updateHandle(version: string) {
+  return { version }
 }
 
 describe('useUpdater', () => {
   beforeEach(() => {
     mockCheck.mockReset()
-    mockRelaunch.mockReset().mockResolvedValue(undefined)
     mockGetVersion.mockReset().mockResolvedValue('1.0.9')
+    mockInstallUpdate.mockReset().mockResolvedValue({ success: true })
   })
 
   afterEach(() => {
@@ -86,22 +88,27 @@ describe('useUpdater', () => {
     expect(result.current.available).toBe(false)
   })
 
-  it('installs and relaunches when asked', async () => {
-    const install = vi.fn().mockResolvedValue(undefined)
-    mockCheck.mockResolvedValue(updateHandle('1.1.0', install))
+  it('installs through the backend so the signature is checked', async () => {
+    mockCheck.mockResolvedValue(updateHandle('1.1.0'))
     const { result } = renderHook(() => useUpdater())
 
     await act(async () => {
       await result.current.downloadAndInstall()
     })
 
-    expect(install).toHaveBeenCalledOnce()
-    expect(mockRelaunch).toHaveBeenCalledOnce()
+    expect(mockInstallUpdate).toHaveBeenCalledOnce()
+    expect(result.current.error).toBeNull()
   })
 
-  it('clears the downloading flag when an install fails', async () => {
-    const install = vi.fn().mockRejectedValue(new Error('signature rejected'))
-    mockCheck.mockResolvedValue(updateHandle('1.1.0', install))
+  it('surfaces a refusal from the signature check', async () => {
+    // What the backend returns when a pin does not hold. Reaching the renderer
+    // at all means nothing was installed, since a successful install exits the
+    // process instead of replying.
+    mockInstallUpdate.mockResolvedValue({
+      success: false,
+      error: 'This update was refused because installer is signed with an unexpected certificate. Nothing was installed.',
+    })
+    mockCheck.mockResolvedValue(updateHandle('1.1.0'))
     const { result } = renderHook(() => useUpdater())
 
     await act(async () => {
@@ -109,9 +116,20 @@ describe('useUpdater', () => {
     })
 
     expect(result.current.downloading).toBe(false)
-    expect(result.current.error).toContain('signature rejected')
-    // A rejected payload must never restart into a half-applied update.
-    expect(mockRelaunch).not.toHaveBeenCalled()
+    expect(result.current.error).toContain('unexpected certificate')
+  })
+
+  it('clears the downloading flag when the install call itself throws', async () => {
+    mockInstallUpdate.mockRejectedValue(new Error('ipc unavailable'))
+    mockCheck.mockResolvedValue(updateHandle('1.1.0'))
+    const { result } = renderHook(() => useUpdater())
+
+    await act(async () => {
+      await result.current.downloadAndInstall()
+    })
+
+    expect(result.current.downloading).toBe(false)
+    expect(result.current.error).toContain('ipc unavailable')
   })
 
   it('checks once on its own shortly after mount', async () => {
