@@ -41,6 +41,16 @@
   running version and whether a check actually completed, which is what lets
   the UI distinguish "up to date" from "never checked" and stops a failed
   network check from being displayed as current.
+- **The installer is pinned to our code-signing certificate.** Installing now
+  goes through the `updater_install` command instead of the plugin's
+  `downloadAndInstall`, because the plugin verifies the minisign signature
+  inside `download` and verifies nothing inside `install`. In that gap,
+  `update_guard` requires a valid Authenticode signature, the pinned EV
+  certificate thumbprint, the pinned signer name, and a `FileVersion` matching
+  the offered version, so a leaked minisign key is no longer sufficient on its
+  own and a genuinely signed older installer cannot be served as a new
+  release. Refusals install nothing and say why. The IPC contract goes from 31
+  commands to 32.
 - **The update path is documented and tested.**
   [AUTO_UPDATE.md](AUTO_UPDATE.md) records the flow, what the minisign
   verification does and does not cover, and the gaps: no Authenticode pin on
