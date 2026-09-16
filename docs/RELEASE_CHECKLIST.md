@@ -55,6 +55,10 @@ On the EV-cert Windows host:
 - [ ] `signtool.exe` is on `PATH` for the build shell : typically `C:\Program Files (x86)\Windows Kits\10\bin\<latest>\x64`. Verify with `Get-Command signtool.exe`.
 - [ ] `npx tauri build` produces `.exe`, `.msi`, and matching `.exe.sig` / `.msi.sig` minisign sidecars in `src-tauri/target/release/bundle/{nsis,msi}/`. The `.sig` is computed over the **EV-signed** bytes : order is enforced by Tauri's bundler when `signCommand` is configured. Sidecars only appear when `TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]` env vars are set; if missing, the build fails because `bundle.createUpdaterArtifacts` is `true`.
 - [ ] EV signature on the installer: right-click `.exe` → Properties → Digital Signatures shows "OK Studio" (or run `signtool verify /pa /v <path>`)
+- [ ] **The updater's own pins accept this installer.** Run the guard against the signed artifact, which is the only way to exercise it:
+      `$env:MACROVOX_INSTALLER = "<path to the signed setup.exe>"` then
+      `cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture real_signed_installer`.
+      It prints the Authenticode status, thumbprint, subject and embedded `FileVersion` before asserting, so a failure names the pin that broke. Do not skip this: the pins ship inside a release but are only exercised when that release installs the *next* one, so a wrong pin strands every client on a manual reinstall. Pinned values live in `src-tauri/src/update_guard.rs`.
 - [ ] `npm run release:windows` copies all of the above into `release/windows/`
 - [ ] **Clean-VM smoke test** on a Windows 11 VM with no prior MacroVox install:
   - [ ] NSIS installer runs end-to-end without SmartScreen warnings
