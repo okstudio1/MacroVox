@@ -1,3 +1,4 @@
+use log::{debug, warn};
 /// MacroVox Tauri commands.
 ///
 /// Every command here mirrors one channel from the Electron preload
@@ -12,7 +13,6 @@
 ///   ✅ Phase 6 — auth stubs removed; Supabase JS SDK used from renderer
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use log::{debug, warn};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -109,15 +109,32 @@ fn parse_key_code(s: &str) -> Result<Code, String> {
             // multi-byte codepoints (where len() == 1 would not).
             let ch = s.chars().next().expect("count is 1").to_ascii_uppercase();
             match ch {
-                'A' => Ok(Code::KeyA), 'B' => Ok(Code::KeyB), 'C' => Ok(Code::KeyC),
-                'D' => Ok(Code::KeyD), 'E' => Ok(Code::KeyE), 'F' => Ok(Code::KeyF),
-                'G' => Ok(Code::KeyG), 'H' => Ok(Code::KeyH), 'I' => Ok(Code::KeyI),
-                'J' => Ok(Code::KeyJ), 'K' => Ok(Code::KeyK), 'L' => Ok(Code::KeyL),
-                'M' => Ok(Code::KeyM), 'N' => Ok(Code::KeyN), 'O' => Ok(Code::KeyO),
-                'P' => Ok(Code::KeyP), 'Q' => Ok(Code::KeyQ), 'R' => Ok(Code::KeyR),
-                'S' => Ok(Code::KeyS), 'T' => Ok(Code::KeyT), 'U' => Ok(Code::KeyU),
-                'V' => Ok(Code::KeyV), 'W' => Ok(Code::KeyW), 'X' => Ok(Code::KeyX),
-                'Y' => Ok(Code::KeyY), 'Z' => Ok(Code::KeyZ),
+                'A' => Ok(Code::KeyA),
+                'B' => Ok(Code::KeyB),
+                'C' => Ok(Code::KeyC),
+                'D' => Ok(Code::KeyD),
+                'E' => Ok(Code::KeyE),
+                'F' => Ok(Code::KeyF),
+                'G' => Ok(Code::KeyG),
+                'H' => Ok(Code::KeyH),
+                'I' => Ok(Code::KeyI),
+                'J' => Ok(Code::KeyJ),
+                'K' => Ok(Code::KeyK),
+                'L' => Ok(Code::KeyL),
+                'M' => Ok(Code::KeyM),
+                'N' => Ok(Code::KeyN),
+                'O' => Ok(Code::KeyO),
+                'P' => Ok(Code::KeyP),
+                'Q' => Ok(Code::KeyQ),
+                'R' => Ok(Code::KeyR),
+                'S' => Ok(Code::KeyS),
+                'T' => Ok(Code::KeyT),
+                'U' => Ok(Code::KeyU),
+                'V' => Ok(Code::KeyV),
+                'W' => Ok(Code::KeyW),
+                'X' => Ok(Code::KeyX),
+                'Y' => Ok(Code::KeyY),
+                'Z' => Ok(Code::KeyZ),
                 _ => Err(format!("Unknown key: {s}")),
             }
         }
@@ -127,7 +144,9 @@ fn parse_key_code(s: &str) -> Result<Code, String> {
 
 /// Lock a mutex, recovering from poison if a prior thread panicked.
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ── Shared response types ─────────────────────────────────────────────────────
@@ -141,10 +160,16 @@ pub struct OkResponse {
 
 impl OkResponse {
     pub fn ok() -> Self {
-        Self { success: true, error: None }
+        Self {
+            success: true,
+            error: None,
+        }
     }
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { success: false, error: Some(msg.into()) }
+        Self {
+            success: false,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -182,8 +207,16 @@ pub fn audio_list_devices(state: State<AppState>) -> AudioDevicesResponse {
         .unwrap_or_default();
     let devices = filter_device_list(devices);
     let selected = lock_or_recover(&state.selected_mic_device).clone();
-    debug!("[audio] devices found: {:?}, selected: {:?}", devices, selected);
-    AudioDevicesResponse { success: true, devices, selected, error: None }
+    debug!(
+        "[audio] devices found: {:?}, selected: {:?}",
+        devices, selected
+    );
+    AudioDevicesResponse {
+        success: true,
+        devices,
+        selected,
+        error: None,
+    }
 }
 
 /// On Linux, cpal's ALSA host enumerates dozens of virtual/alias devices
@@ -194,13 +227,33 @@ fn filter_device_list(devices: Vec<String>) -> Vec<String> {
     #[cfg(target_os = "linux")]
     {
         const NOISE_PREFIXES: &[&str] = &[
-            "sysdefault:", "front:", "rear:", "center_lfe:", "side:",
-            "surround21:", "surround40:", "surround41:", "surround50:",
-            "surround51:", "surround71:",
-            "iec958:", "spdif:", "hdmi:",
-            "dmix:", "dsnoop:", "hw:", "plughw:",
-            "modem:", "phoneline:", "upmix", "vdownmix",
-            "samplerate", "speexrate", "null", "jack", "oss",
+            "sysdefault:",
+            "front:",
+            "rear:",
+            "center_lfe:",
+            "side:",
+            "surround21:",
+            "surround40:",
+            "surround41:",
+            "surround50:",
+            "surround51:",
+            "surround71:",
+            "iec958:",
+            "spdif:",
+            "hdmi:",
+            "dmix:",
+            "dsnoop:",
+            "hw:",
+            "plughw:",
+            "modem:",
+            "phoneline:",
+            "upmix",
+            "vdownmix",
+            "samplerate",
+            "speexrate",
+            "null",
+            "jack",
+            "oss",
             "usbstream:",
         ];
         let mut out: Vec<String> = devices
@@ -240,7 +293,10 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
 
     let host = cpal::default_host();
     let device_name = lock_or_recover(&state.selected_mic_device).clone();
-    debug!("[audio] audio_start called, selected device: {:?}", device_name);
+    debug!(
+        "[audio] audio_start called, selected device: {:?}",
+        device_name
+    );
 
     // Find the requested device, or fall back to the system default.
     let device = if let Some(ref name) = device_name {
@@ -248,7 +304,10 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
             .ok()
             .and_then(|mut iter| iter.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
             .or_else(|| {
-                warn!("[audio] Device {:?} not found, falling back to default", name);
+                warn!(
+                    "[audio] Device {:?} not found, falling back to default",
+                    name
+                );
                 host.default_input_device()
             })
     } else {
@@ -268,8 +327,12 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
 
     let config = match device.default_input_config() {
         Ok(c) => {
-            debug!("[audio] Input config: {:?}ch @ {}Hz, format={:?}",
-                   c.channels(), c.sample_rate().0, c.sample_format());
+            debug!(
+                "[audio] Input config: {:?}ch @ {}Hz, format={:?}",
+                c.channels(),
+                c.sample_rate().0,
+                c.sample_format()
+            );
             c
         }
         Err(e) => {
@@ -288,7 +351,8 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
 
     let dg_sender = Arc::clone(&state.dg_sender);
 
-    match crate::audio::build_input_stream(&device, &config, level, buffer, is_recording, dg_sender) {
+    match crate::audio::build_input_stream(&device, &config, level, buffer, is_recording, dg_sender)
+    {
         Ok(stream) => {
             if let Err(e) = stream.play() {
                 warn!("[audio] Failed to start stream: {e}");
@@ -366,10 +430,26 @@ pub async fn deepgram_start(
     let keywords = lock_or_recover(&state.deepgram_keywords).clone();
     let number_format = lock_or_recover(&state.number_format).clone();
     let language = lock_or_recover(&state.transcription_language).clone();
-    debug!("[deepgram] Starting session: {}Hz, {}ch, {} keywords, numbers={}, lang={}",
-           sample_rate, channels, keywords.len(), number_format, language);
+    debug!(
+        "[deepgram] Starting session: {}Hz, {}ch, {} keywords, numbers={}, lang={}",
+        sample_rate,
+        channels,
+        keywords.len(),
+        number_format,
+        language
+    );
 
-    match crate::deepgram_ws::start_session(&credential, sample_rate, channels, &keywords, &number_format, &language, app).await {
+    match crate::deepgram_ws::start_session(
+        &credential,
+        sample_rate,
+        channels,
+        &keywords,
+        &number_format,
+        &language,
+        app,
+    )
+    .await
+    {
         Ok(sender) => {
             debug!("[deepgram] WebSocket session established");
             // Replace any existing sender first — on a double-start the previous
@@ -507,7 +587,11 @@ pub async fn recording_stop(
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        warn!("[recording] Deepgram returned {}: {}", status, &text[..text.len().min(200)]);
+        warn!(
+            "[recording] Deepgram returned {}: {}",
+            status,
+            &text[..text.len().min(200)]
+        );
         return Ok(RecordingStopResponse {
             success: false,
             transcript: None,
@@ -562,7 +646,12 @@ pub async fn recording_stop(
                     let app_handle = app.clone();
                     std::thread::spawn(move || {
                         match crate::voice_buffer::save_recording(
-                            &dir, &samples, safe_sample_rate, safe_channels, &transcript_clone, Some(max_size),
+                            &dir,
+                            &samples,
+                            safe_sample_rate,
+                            safe_channels,
+                            &transcript_clone,
+                            Some(max_size),
                         ) {
                             Ok(_) => {
                                 let _ = app_handle.emit("voice-buffer-updated", ());
@@ -624,10 +713,7 @@ pub fn recording_cancel(state: State<AppState>) -> OkResponse {
 /// `https://huggingface.co/ggerganov/whisper.cpp/tree/main`
 /// Recommended starter: `ggml-base.en.bin` (~142 MB, English only, fast)
 #[tauri::command]
-pub fn whisper_transcribe(
-    model_path: String,
-    state: State<AppState>,
-) -> RecordingStopResponse {
+pub fn whisper_transcribe(model_path: String, state: State<AppState>) -> RecordingStopResponse {
     *lock_or_recover(&state.is_recording) = false;
     let samples = std::mem::take(&mut *lock_or_recover(&state.recording_buffer));
     let sample_rate = *lock_or_recover(&state.audio_sample_rate);
@@ -692,7 +778,8 @@ fn whisper_transcribe_impl(
         };
     }
 
-    let ctx = match WhisperContext::new_with_params(model_path, WhisperContextParameters::default()) {
+    let ctx = match WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+    {
         Ok(c) => c,
         Err(e) => {
             return RecordingStopResponse {
@@ -939,7 +1026,10 @@ pub fn update_global_hotkey(
     }
 
     *lock_or_recover(&state.global_hotkey) = shortcut;
-    debug!("[hotkey] Updated global hotkey to: {}", lock_or_recover(&state.global_hotkey));
+    debug!(
+        "[hotkey] Updated global hotkey to: {}",
+        lock_or_recover(&state.global_hotkey)
+    );
     OkResponse::ok()
 }
 
@@ -1001,10 +1091,7 @@ pub fn voice_buffer_get_audio(
 
 /// Deletes a single recording from the voice buffer.
 #[tauri::command]
-pub fn voice_buffer_delete(
-    filename: String,
-    state: State<AppState>,
-) -> OkResponse {
+pub fn voice_buffer_delete(filename: String, state: State<AppState>) -> OkResponse {
     let dir = lock_or_recover(&state.voice_buffer_dir).clone();
     match crate::voice_buffer::delete_recording(&dir, &filename) {
         Ok(()) => OkResponse::ok(),
@@ -1026,10 +1113,7 @@ pub fn voice_buffer_clear(state: State<AppState>) -> OkResponse {
 /// Called automatically after recording_stop if voice buffer is enabled,
 /// or manually from the frontend.
 #[tauri::command]
-pub fn voice_buffer_save(
-    transcript: String,
-    state: State<AppState>,
-) -> OkResponse {
+pub fn voice_buffer_save(transcript: String, state: State<AppState>) -> OkResponse {
     let enabled = *lock_or_recover(&state.voice_buffer_enabled);
     if !enabled {
         return OkResponse::err("Voice buffer is disabled");
@@ -1044,7 +1128,12 @@ pub fn voice_buffer_save(
     let max_size = *lock_or_recover(&state.voice_buffer_max_size);
 
     match crate::voice_buffer::save_recording(
-        &dir, &samples, sample_rate, channels, &transcript, Some(max_size),
+        &dir,
+        &samples,
+        sample_rate,
+        channels,
+        &transcript,
+        Some(max_size),
     ) {
         Ok(_filename) => OkResponse::ok(),
         Err(e) => OkResponse::err(e),
@@ -1110,13 +1199,17 @@ pub async fn voice_buffer_reprocess(
 
     if samples_i16.is_empty() {
         return Ok(RecordingStopResponse {
-            success: false, transcript: None, confidence: None,
-            duration: None, error: Some("No audio in recording".to_string()),
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: None,
+            error: Some("No audio in recording".to_string()),
         });
     }
 
     // Convert i16 → f32 for WAV encoding
-    let samples_f32: Vec<f32> = samples_i16.iter()
+    let samples_f32: Vec<f32> = samples_i16
+        .iter()
         .map(|&s| s as f32 / i16::MAX as f32)
         .collect();
     let duration = samples_f32.len() as f64 / (sample_rate as f64 * source_channels as f64);
@@ -1149,8 +1242,11 @@ pub async fn voice_buffer_reprocess(
         Ok(r) => r,
         Err(e) => {
             return Ok(RecordingStopResponse {
-                success: false, transcript: None, confidence: None,
-                duration: Some(duration), error: Some(format!("Deepgram request failed: {e}")),
+                success: false,
+                transcript: None,
+                confidence: None,
+                duration: Some(duration),
+                error: Some(format!("Deepgram request failed: {e}")),
             })
         }
     };
@@ -1158,10 +1254,17 @@ pub async fn voice_buffer_reprocess(
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        warn!("[reprocess] Deepgram returned {}: {}", status, &text[..text.len().min(200)]);
+        warn!(
+            "[reprocess] Deepgram returned {}: {}",
+            status,
+            &text[..text.len().min(200)]
+        );
         return Ok(RecordingStopResponse {
-            success: false, transcript: None, confidence: None,
-            duration: Some(duration), error: Some(format!("Deepgram error ({})", status)),
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: Some(duration),
+            error: Some(format!("Deepgram error ({})", status)),
         });
     }
 
@@ -1169,13 +1272,17 @@ pub async fn voice_buffer_reprocess(
         Ok(j) => j,
         Err(e) => {
             return Ok(RecordingStopResponse {
-                success: false, transcript: None, confidence: None,
-                duration: Some(duration), error: Some(format!("Invalid Deepgram response: {e}")),
+                success: false,
+                transcript: None,
+                confidence: None,
+                duration: Some(duration),
+                error: Some(format!("Invalid Deepgram response: {e}")),
             });
         }
     };
 
-    let alt = json.get("results")
+    let alt = json
+        .get("results")
         .and_then(|r| r.get("channels"))
         .and_then(|ch| ch.get(0))
         .and_then(|c| c.get("alternatives"))
@@ -1190,8 +1297,11 @@ pub async fn voice_buffer_reprocess(
             error: None,
         }),
         None => Ok(RecordingStopResponse {
-            success: false, transcript: None, confidence: None,
-            duration: Some(duration), error: Some("Unexpected Deepgram response structure".to_string()),
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: Some(duration),
+            error: Some("Unexpected Deepgram response structure".to_string()),
         }),
     }
 }
@@ -1230,7 +1340,10 @@ mod tests {
     #[test]
     fn ok_response_serialises_no_error_field_when_none() {
         let json = serde_json::to_string(&OkResponse::ok()).unwrap();
-        assert!(!json.contains("error"), "error field should be omitted: {json}");
+        assert!(
+            !json.contains("error"),
+            "error field should be omitted: {json}"
+        );
         assert!(json.contains("\"success\":true"));
     }
 
@@ -1287,7 +1400,10 @@ mod tests {
     fn settings_broadcast_parses_keywords() {
         let state = AppState::default();
         let mut map = HashMap::new();
-        map.insert("deepgram_keywords".to_string(), "MacroVox\nDeepgram\n".to_string());
+        map.insert(
+            "deepgram_keywords".to_string(),
+            "MacroVox\nDeepgram\n".to_string(),
+        );
         if let Some(raw) = map.get("deepgram_keywords") {
             let keywords: Vec<String> = raw
                 .split('\n')
@@ -1315,7 +1431,10 @@ mod tests {
     fn audio_set_device_updates_state() {
         let state = AppState::default();
         *lock_or_recover(&state.selected_mic_device) = Some("Headset".to_string());
-        assert_eq!(lock_or_recover(&state.selected_mic_device).as_deref(), Some("Headset"));
+        assert_eq!(
+            lock_or_recover(&state.selected_mic_device).as_deref(),
+            Some("Headset")
+        );
     }
 
     #[test]
@@ -1383,8 +1502,10 @@ mod tests {
         let state = AppState::default();
         for raw in ["1", "yes", "TRUE", "True", "", "garbage"] {
             *lock_or_recover(&state.voice_buffer_enabled) = raw == "true";
-            assert!(!*lock_or_recover(&state.voice_buffer_enabled),
-                "expected disabled for value {raw:?}");
+            assert!(
+                !*lock_or_recover(&state.voice_buffer_enabled),
+                "expected disabled for value {raw:?}"
+            );
         }
     }
 
@@ -1417,8 +1538,11 @@ mod tests {
                     *lock_or_recover(&state.voice_buffer_max_size) = size;
                 }
             }
-            assert_eq!(*lock_or_recover(&state.voice_buffer_max_size), initial,
-                "unparseable {bad:?} must leave max_size unchanged");
+            assert_eq!(
+                *lock_or_recover(&state.voice_buffer_max_size),
+                initial,
+                "unparseable {bad:?} must leave max_size unchanged"
+            );
         }
     }
 

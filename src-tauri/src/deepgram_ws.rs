@@ -211,9 +211,12 @@ pub async fn start_session(
         }
 
         if !graceful {
-            let _ = app.emit("deepgram:error", serde_json::json!({
-                "error": "Connection lost — recording may be incomplete"
-            }));
+            let _ = app.emit(
+                "deepgram:error",
+                serde_json::json!({
+                    "error": "Connection lost — recording may be incomplete"
+                }),
+            );
         }
 
         // Drain any remaining messages after sending CloseStream so Deepgram

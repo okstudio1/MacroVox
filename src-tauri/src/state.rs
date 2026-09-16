@@ -48,7 +48,6 @@ pub struct AppState {
     pub is_quitting: AtomicBool,
 
     // ── Phase 3: cpal WASAPI audio ────────────────────────────────────────────
-
     /// Live cpal capture stream. Dropping it stops audio capture.
     /// `None` when the stream is stopped.
     /// Wrapped in `AudioStream` to satisfy `Send + Sync` bounds (see above).
@@ -74,7 +73,6 @@ pub struct AppState {
     pub audio_channels: Mutex<u16>,
 
     // ── Deepgram ──────────────────────────────────────────────────────────────
-
     /// Keywords forwarded to Deepgram for boosted recognition.
     /// Parsed from the `deepgram_keywords` settings key (newline-separated).
     pub deepgram_keywords: Mutex<Vec<String>>,
@@ -91,7 +89,6 @@ pub struct AppState {
     pub transcription_language: Mutex<String>,
 
     // ── Phase 4: Deepgram WebSocket streaming ─────────────────────────────────
-
     /// Sender half of the channel used to push PCM bytes (and control messages)
     /// to the background Deepgram WebSocket task. `None` when no session is
     /// active. Set by `deepgram_start`, cleared by `deepgram_stop`.
@@ -101,7 +98,6 @@ pub struct AppState {
     pub dg_sender: Arc<Mutex<Option<DgSender>>>,
 
     // ── Voice buffer ─────────────────────────────────────────────────────────
-
     /// Directory where voice memo WAV files and manifest are stored.
     /// Set during app setup to `%LOCALAPPDATA%/com.okstudio.macrovox/voice-buffer/`.
     pub voice_buffer_dir: Mutex<PathBuf>,
@@ -179,7 +175,11 @@ mod tests {
     #[test]
     fn state_recording_buffer_accumulates() {
         let state = AppState::default();
-        state.recording_buffer.lock().unwrap().extend([0.1f32, 0.2, 0.3]);
+        state
+            .recording_buffer
+            .lock()
+            .unwrap()
+            .extend([0.1f32, 0.2, 0.3]);
         assert_eq!(state.recording_buffer.lock().unwrap().len(), 3);
     }
 
@@ -193,8 +193,16 @@ mod tests {
     fn state_voice_buffer_defaults() {
         let state = AppState::default();
         assert!(!*state.voice_buffer_enabled.lock().unwrap());
-        assert_eq!(*state.voice_buffer_max_size.lock().unwrap(), 100 * 1024 * 1024);
-        assert!(state.voice_buffer_dir.lock().unwrap().as_os_str().is_empty());
+        assert_eq!(
+            *state.voice_buffer_max_size.lock().unwrap(),
+            100 * 1024 * 1024
+        );
+        assert!(state
+            .voice_buffer_dir
+            .lock()
+            .unwrap()
+            .as_os_str()
+            .is_empty());
     }
 
     #[test]

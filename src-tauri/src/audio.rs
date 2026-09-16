@@ -6,15 +6,17 @@
 //! - `process_audio_frame` — cpal callback body; updates level, buffer, and streams PCM
 //! - `build_input_stream`  — open a cpal capture stream, dispatching on sample format
 
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::deepgram_ws::{DgMessage, DgSender};
 use cpal::traits::DeviceTrait;
 use log::warn;
-use crate::deepgram_ws::{DgMessage, DgSender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Lock a mutex, recovering from poison if a prior thread panicked.
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Counter for frames dropped due to channel backpressure. Surfaced via a
@@ -45,8 +47,8 @@ pub fn pcm_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
 
     // fmt chunk (16-byte PCM format)
     buf.extend_from_slice(b"fmt ");
-    buf.extend_from_slice(&16u32.to_le_bytes());         // chunk size
-    buf.extend_from_slice(&1u16.to_le_bytes());          // PCM = 1
+    buf.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM = 1
     buf.extend_from_slice(&channels.to_le_bytes());
     buf.extend_from_slice(&sample_rate.to_le_bytes());
     buf.extend_from_slice(&byte_rate.to_le_bytes());
@@ -176,44 +178,36 @@ pub fn build_input_stream(
             err_fn,
             None,
         ),
-        cpal::SampleFormat::I16 => {
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[i16], _| {
-                    let floats: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                    process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
-                },
-                err_fn,
-                None,
-            )
-        }
-        cpal::SampleFormat::I32 => {
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[i32], _| {
-                    let floats: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
-                    process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
-                },
-                err_fn,
-                None,
-            )
-        }
-        cpal::SampleFormat::U16 => {
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[u16], _| {
-                    let floats: Vec<f32> = data
-                        .iter()
-                        .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                        .collect();
-                    process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
-                },
-                err_fn,
-                None,
-            )
-        }
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            &config.config(),
+            move |data: &[i16], _| {
+                let floats: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I32 => device.build_input_stream(
+            &config.config(),
+            move |data: &[i32], _| {
+                let floats: Vec<f32> = data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
+                process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => device.build_input_stream(
+            &config.config(),
+            move |data: &[u16], _| {
+                let floats: Vec<f32> = data
+                    .iter()
+                    .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                    .collect();
+                process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
+            },
+            err_fn,
+            None,
+        ),
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
     }
 }
@@ -286,7 +280,10 @@ mod tests {
         process_audio_frame(&[1.0, -1.0], &level, &buffer, &is_recording, &no_sender());
         let lvl = *level.lock().unwrap();
         assert!((lvl - 1.0).abs() < 1e-6, "level = {lvl}");
-        assert!(buffer.lock().unwrap().is_empty(), "no buffering when not recording");
+        assert!(
+            buffer.lock().unwrap().is_empty(),
+            "no buffering when not recording"
+        );
     }
 
     #[test]
@@ -295,7 +292,13 @@ mod tests {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let is_recording = Arc::new(Mutex::new(true));
 
-        process_audio_frame(&[0.1, 0.2, 0.3], &level, &buffer, &is_recording, &no_sender());
+        process_audio_frame(
+            &[0.1, 0.2, 0.3],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+        );
         let buf = buffer.lock().unwrap().clone();
         assert_eq!(buf, vec![0.1, 0.2, 0.3]);
     }
