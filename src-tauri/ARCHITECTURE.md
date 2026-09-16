@@ -44,6 +44,18 @@ Tauri converts snake_case command names to camelCase automatically.
 | `audio_list_devices` | `listAudioDevices()` | `AudioDevicesResponse` |
 | `audio_set_device(device_name)` | `setAudioDevice(name)` | `OkResponse` |
 
+The string in `audio_set_device` is what persists as the user's microphone,
+so its format is a compatibility contract. cpal 0.17 returns a
+`DeviceDescription` rather than a single name, and on WASAPI the endpoint is in
+`name` while the adapter is in `driver`. `device_label` recombines them as
+`name (driver)`, which reproduces what cpal 0.15 returned from `Device::name`,
+so selections saved by older builds keep matching. `name` alone is not
+sufficient: it is not unique, and a machine with several microphones can report
+the same label for all of them. Hosts that report no adapter fall back to the
+bare name, which also leaves ALSA-style prefixes intact for the Linux filter
+below. `format_device_label` holds the format and is unit tested without audio
+hardware.
+
 On Linux, `audio_list_devices` runs the raw cpal/ALSA enumeration through
 `filter_device_list`, which strips virtual aliases (`hw:`, `plughw:`, `dmix:`,
 `dsnoop:`, `surround*:`, `iec958:`, `hdmi:`, `sysdefault:`, monitor taps) so
