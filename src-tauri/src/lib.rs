@@ -159,8 +159,6 @@ pub fn run() {
             recording_start,
             recording_stop,
             recording_cancel,
-            // Local STT (whisper-rs)
-            whisper_transcribe,
             // Clipboard & auto-paste
             clipboard_write,
             dictation_auto_paste,
