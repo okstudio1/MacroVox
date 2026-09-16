@@ -38,6 +38,11 @@ vi.mock('../../hooks/usePostProcessing', () => ({
   usePostProcessing: () => ({ postProcess: vi.fn() }),
 }))
 
+vi.mock('../deepgramCredential', () => ({
+  ownKey: () => null,
+  resolveDeepgramCredential: vi.fn().mockResolvedValue({ success: false, error: 'no credential in this test' }),
+}))
+
 import { VoiceHistory } from '../../components/VoiceHistory'
 
 describe('VoiceHistory action failures', () => {

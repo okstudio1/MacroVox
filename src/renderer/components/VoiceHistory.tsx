@@ -30,11 +30,6 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
   const [copiedFile, setCopiedFile] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: string } | null>(null)
   const [sortNewestFirst, setSortNewestFirst] = useState(true)
-
-  // Whether reprocessing might work at all, not a guarantee: BYOK is checked
-  // here directly, but managed entitlement is only known once
-  // resolveDeepgramCredential() (in handleReprocess) actually asks for a grant.
-  const canReprocess = !!(user || ownKey())
   const [actionError, setActionError] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
@@ -43,6 +38,11 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
     useProxy: !!user,
     userId: user?.id,
   })
+
+  // Whether reprocessing might work at all, not a guarantee: BYOK is checked
+  // here directly, but managed entitlement is only known once
+  // resolveDeepgramCredential() (in handleReprocess) actually asks for a grant.
+  const canReprocess = !!(user || ownKey())
 
   const loadRecordings = useCallback(async (showSpinner = true) => {
     if (showSpinner) setLoading(true)
