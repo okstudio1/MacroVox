@@ -14,6 +14,7 @@ import * as ipc from '../lib/tauri-ipc'
 import { resolveDeepgramCredential } from '../lib/deepgramCredential'
 import type { VoiceRecording } from '../lib/tauri-ipc'
 import { safeAudioMime } from '../lib/audio-mime'
+import { formatDuration, transcribeRecording } from '../lib/recordings'
 
 interface VoiceHistoryProps {
   user?: { id: string } | null
@@ -124,29 +125,15 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
 
     setReprocessingFile(file)
     try {
-      // Step 1: Re-transcribe through Deepgram
-      const result = await ipc.voiceBufferReprocess(file, credential.credential)
-      if (!result.success || !result.transcript) {
-        console.warn('[VoiceHistory] Re-transcription failed:', result.error)
+      const aiCleanup = localStorage.getItem('dictation_ai_cleanup') !== 'false'
+      const outcome = await transcribeRecording(file, credential.credential, postProcess, { aiCleanup })
+      if (!outcome.success) {
+        console.warn('[VoiceHistory] Re-transcription failed:', outcome.error)
         return
       }
-
-      let finalTranscript = result.transcript
-
-      // Step 2: Run Claude AI cleanup if enabled
-      const aiCleanup = localStorage.getItem('dictation_ai_cleanup') !== 'false'
-      if (aiCleanup) {
-        const cleaned = await postProcess(finalTranscript)
-        if (cleaned) finalTranscript = cleaned
-      }
-
-      // Step 3: Update manifest with new transcript
-      await ipc.voiceBufferUpdateTranscript(file, finalTranscript)
       setRecordings(prev =>
-        prev.map(r => r.file === file ? { ...r, transcript: finalTranscript } : r)
+        prev.map(r => r.file === file ? { ...r, transcript: outcome.transcript } : r)
       )
-    } catch {
-      console.warn('[VoiceHistory] Reprocess failed for', file)
     } finally {
       setReprocessingFile(null)
     }
@@ -172,12 +159,6 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
       audioRef.current?.pause()
     }
   }, [])
-
-  const formatDuration = (secs: number) => {
-    const m = Math.floor(secs / 60)
-    const s = Math.floor(secs % 60)
-    return `${m}:${s.toString().padStart(2, '0')}`
-  }
 
   const formatSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`

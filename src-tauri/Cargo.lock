@@ -2525,6 +2525,7 @@ dependencies = [
 name = "macrovox"
 version = "1.0.8"
 dependencies = [
+ "audiopus",
  "base64 0.22.1",
  "chrono",
  "cpal",
@@ -2532,6 +2533,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "log",
+ "ogg",
  "ogg-opus",
  "reqwest 0.12.28",
  "serde",

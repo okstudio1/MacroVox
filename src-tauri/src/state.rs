@@ -107,6 +107,15 @@ pub struct AppState {
 
     /// Maximum voice buffer size in bytes (default 100 MB).
     pub voice_buffer_max_size: Mutex<u64>,
+
+    // ── Record-only capture (streaming OGG Opus writer) ──────────────────────
+    /// Sender half of the capture tap feeding the record-only writer thread.
+    /// `None` when no record-only session is active. `Arc` so the cpal callback
+    /// can hold a clone. Dropping the sender ends the writer thread's loop.
+    pub capture_tap: Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
+
+    /// The in-flight record-only session, joined by `voice_buffer_record_stop`.
+    pub active_recording: Mutex<Option<crate::recorder::ActiveRecording>>,
 }
 
 impl Default for AppState {
@@ -130,6 +139,8 @@ impl Default for AppState {
             voice_buffer_dir: Mutex::new(PathBuf::new()),
             voice_buffer_enabled: Mutex::new(false),
             voice_buffer_max_size: Mutex::new(100 * 1024 * 1024), // 100 MB
+            capture_tap: Arc::new(Mutex::new(None)),
+            active_recording: Mutex::new(None),
         }
     }
 }
@@ -152,6 +163,8 @@ mod tests {
         assert_eq!(*state.audio_channels.lock().unwrap(), 1);
         assert!(state.deepgram_keywords.lock().unwrap().is_empty());
         assert!(state.dg_sender.lock().unwrap().is_none());
+        assert!(state.capture_tap.lock().unwrap().is_none());
+        assert!(state.active_recording.lock().unwrap().is_none());
     }
 
     #[test]

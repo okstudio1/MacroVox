@@ -49,6 +49,11 @@ enigo = "0.2"
 chrono = "0.4"
 base64 = "0.22"
 ogg-opus = "0.1"
+# Streaming OGG Opus writer for unlimited-length "record only" sessions (same
+# crates ogg-opus already pulls in, used directly so pages can be written as
+# audio arrives instead of encoding one big buffer at the end).
+audiopus = "0.2"
+ogg = "0.8"
 
 # Auto-updater + process relaunch
 tauri-plugin-updater = "2"

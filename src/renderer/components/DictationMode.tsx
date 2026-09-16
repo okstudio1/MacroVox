@@ -24,15 +24,29 @@
  * Hotkey integration: listens for `quick-dictation-start` (begin recording on
  * first show) and `quick-dictation-toggle` (start ↔ stop+copy) events emitted
  * by the backend in response to the global Ctrl+Space hotkey.
+ *
+ * Modes: the "Dictate" / "Record" toggle under the titlebar picks between the
+ * flow above and a record-only flow (`voiceBufferRecordStart` / `...Stop`)
+ * that streams audio straight into the voice buffer with no length limit and
+ * no transcription. The Recordings side panel (toggled from the titlebar)
+ * lists both kinds of entry and can transcribe a recording on demand; the
+ * window is widened by `PANEL_WIDTH` while it is open. Hotkey events follow
+ * the current mode (see `resolveHotkeyAction`).
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Mic, MicOff, Copy, Check, Trash2, Loader2, Settings, Minus, X } from 'lucide-react'
+import { Mic, MicOff, Copy, Check, Trash2, Loader2, Settings, Minus, X, Disc, Square, History } from 'lucide-react'
 import { usePostProcessing } from '../hooks/usePostProcessing'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import * as ipc from '../lib/tauri-ipc'
 import type { AppUser } from '../lib/tauri-ipc'
 import * as auth from '../lib/auth'
 import { ownKey, resolveDeepgramCredential } from '../lib/deepgramCredential'
+import { RecordingsPanel } from './RecordingsPanel'
+import { formatDuration } from '../lib/recordings'
+import {
+  loadHudMode, saveHudMode, resolveHotkeyAction, widthForPanel,
+  BASE_HEIGHT, BASE_WIDTH, PANEL_WIDTH, type HudMode, type HotkeyAction,
+} from '../lib/hud-mode'
 
 export function DictationMode() {
   const [isRecording, setIsRecording] = useState(false)
@@ -48,6 +62,15 @@ export function DictationMode() {
   const [isLoadingKey, setIsLoadingKey] = useState(true)
   const [user, setUser] = useState<AppUser | null>(null)
   const [audioLevel, setAudioLevel] = useState(0)
+  // 'dictate' = transcribe as before; 'record' = stream to a file, no limit.
+  const [hudMode, setHudMode] = useState<HudMode>(() => loadHudMode())
+  const [showRecordings, setShowRecordings] = useState(false)
+  const [recordElapsed, setRecordElapsed] = useState(0)
+  const [lastSavedFile, setLastSavedFile] = useState<string | null>(null)
+  const [savedNotice, setSavedNotice] = useState<string | null>(null)
+  const recordTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const recordStartedAtRef = useRef(0)
+  const panelEverOpenedRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null)
   const audioLevelIntervalRef = useRef<NodeJS.Timeout | null>(null)
@@ -111,6 +134,7 @@ export function DictationMode() {
     return () => {
       if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current)
       if (audioLevelIntervalRef.current) clearInterval(audioLevelIntervalRef.current)
+      if (recordTimerRef.current) clearInterval(recordTimerRef.current)
     }
   }, [])
 
@@ -365,6 +389,107 @@ export function DictationMode() {
     }
   }
 
+  // ── Record-only mode ──────────────────────────────────────────────────────
+
+  const switchMode = (mode: HudMode) => {
+    if (isRecording || isPreparing || isProcessing) return
+    setHudMode(mode)
+    saveHudMode(mode)
+    setError(null)
+  }
+
+  const setRecordingsOpen = async (open: boolean) => {
+    setShowRecordings(open)
+    if (open) panelEverOpenedRef.current = true
+    // Widen or narrow the frameless window to make room for the panel. Best
+    // effort: if the window API refuses, the panel just shares the current width.
+    try {
+      const win = getCurrentWindow()
+      const size = (await win.innerSize()).toLogical(await win.scaleFactor())
+      await win.setMinSize(new LogicalSize(open ? BASE_WIDTH + PANEL_WIDTH : BASE_WIDTH, BASE_HEIGHT))
+      await win.setSize(new LogicalSize(widthForPanel(size.width, open), size.height))
+    } catch {}
+  }
+
+  const handleStartCapture = async () => {
+    if (operationInProgressRef.current) return
+    operationInProgressRef.current = true
+    setError(null)
+    setSavedNotice(null)
+    setIsPreparing(true)
+    setAudioLevel(0)
+    try {
+      const result = await ipc.voiceBufferRecordStart()
+      if (!result.success) {
+        setError(result.error || 'Failed to start recording')
+        return
+      }
+      setIsRecording(true)
+      recordStartedAtRef.current = Date.now()
+      setRecordElapsed(0)
+      recordTimerRef.current = setInterval(() => {
+        setRecordElapsed(Math.floor((Date.now() - recordStartedAtRef.current) / 1000))
+      }, 1000)
+      audioLevelIntervalRef.current = setInterval(async () => {
+        const level = await ipc.getAudioLevel()
+        setAudioLevel(level)
+      }, 50)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setIsPreparing(false)
+      operationInProgressRef.current = false
+    }
+  }
+
+  const handleStopCapture = async () => {
+    if (operationInProgressRef.current) return
+    operationInProgressRef.current = true
+    try {
+      if (recordTimerRef.current) {
+        clearInterval(recordTimerRef.current)
+        recordTimerRef.current = null
+      }
+      if (audioLevelIntervalRef.current) {
+        clearInterval(audioLevelIntervalRef.current)
+        audioLevelIntervalRef.current = null
+      }
+      setIsRecording(false)
+      setAudioLevel(0)
+      setIsProcessing(true)
+      // The backend emits voice-buffer-updated itself, so the panel refreshes.
+      const result = await ipc.voiceBufferRecordStop()
+      if (result.success && result.recording) {
+        setLastSavedFile(result.recording.file)
+        setSavedNotice(`Saved ${formatDuration(result.recording.duration_secs)} recording`)
+        // First save of the session: reveal the list so the new entry and its
+        // Transcribe button are obvious. Later saves respect the user's choice.
+        if (!panelEverOpenedRef.current) setRecordingsOpen(true)
+      } else {
+        setError(result.error || 'Failed to save recording')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setIsProcessing(false)
+      operationInProgressRef.current = false
+    }
+  }
+
+  const handleOpenTranscript = (text: string) => {
+    setTranscript(text)
+    streamingTranscriptRef.current = text
+    setError(null)
+    if (autoCopyOnStop) {
+      ipc.copyToClipboard(text)
+        .then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 2000)
+        })
+        .catch(() => {})
+    }
+  }
+
   const handleCopy = async () => {
     if (!transcript) return
     try {
@@ -391,25 +516,24 @@ export function DictationMode() {
 
   // Handle Ctrl+Space quick dictation shortcut (events from backend)
   useEffect(() => {
-    const cleanupStart = ipc.onQuickDictationStart(() => {
-      if (canTranscribe && !isRecording && !isPreparing && !isProcessing) {
-        handleStartRecording()
+    const context = { hudMode, isRecording, busy: isPreparing || isProcessing, hasKey: canTranscribe }
+    const run = (action: HotkeyAction) => {
+      switch (action) {
+        case 'start-dictation': handleStartRecording(); break
+        case 'stop-dictation': handleStopAndCopy(); break
+        case 'start-capture': handleStartCapture(); break
+        case 'stop-capture': handleStopCapture(); break
+        case 'none': break
       }
-    })
-
-    const cleanupToggle = ipc.onQuickDictationToggle(() => {
-      if (isRecording) {
-        handleStopAndCopy()
-      } else if (canTranscribe && !isPreparing && !isProcessing) {
-        handleStartRecording()
-      }
-    })
+    }
+    const cleanupStart = ipc.onQuickDictationStart(() => run(resolveHotkeyAction(context, 'start')))
+    const cleanupToggle = ipc.onQuickDictationToggle(() => run(resolveHotkeyAction(context, 'toggle')))
 
     return () => {
       cleanupStart()
       cleanupToggle()
     }
-  }, [canTranscribe, isRecording, isPreparing, isProcessing])
+  }, [canTranscribe, isRecording, isPreparing, isProcessing, hudMode])
 
   const handleStopAndCopy = async () => {
     if (!canTranscribe || operationInProgressRef.current) return
@@ -480,10 +604,10 @@ export function DictationMode() {
   }
 
   return (
-    <div className="h-screen w-screen flex flex-col p-4 select-none font-mono" style={{ backgroundColor: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
+    <div className="h-screen w-screen flex flex-col select-none font-mono" style={{ backgroundColor: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
       {/* Titlebar: drag the window by pressing anywhere on this bar */}
       <div
-        className="h-8 -mx-4 -mt-4 mb-2 flex items-center justify-between cursor-grab active:cursor-grabbing"
+        className="h-8 shrink-0 mb-1 flex items-center justify-between cursor-grab active:cursor-grabbing"
         onMouseDown={(e) => {
           if (e.button !== 0 || (e.target as HTMLElement).closest('button')) return
           getCurrentWindow().startDragging()
@@ -491,6 +615,16 @@ export function DictationMode() {
       >
         <div className="ml-4 flex-1 h-full" />
         <div className="flex items-center gap-1 pr-1">
+          <button
+            onClick={() => setRecordingsOpen(!showRecordings)}
+            aria-pressed={showRecordings}
+            className="h-7 px-2 rounded flex items-center gap-1 text-[11px] hover:bg-white/10"
+            style={{ color: showRecordings ? 'var(--accent-primary)' : 'var(--text-muted)' }}
+            title={showRecordings ? 'Hide recordings' : 'Show recordings'}
+          >
+            <History size={14} />
+            Recordings
+          </button>
           <button
             onClick={() => ipc.openSettingsWindow()}
             className="p-1 rounded hover:bg-white/10"
@@ -518,9 +652,43 @@ export function DictationMode() {
         </div>
       </div>
 
-      {/* Main content */}
-      <>
-      <div className="shrink-0 flex flex-col items-center justify-center gap-3 pt-2">
+      {/* Main content: dictation column plus the optional recordings panel */}
+      <div className="flex-1 flex flex-row min-h-0">
+      <div className="flex-1 flex flex-col min-w-0 px-4 pb-4">
+      {/* Mode toggle */}
+      <div
+        role="group"
+        aria-label="Mode"
+        className="shrink-0 flex gap-1 rounded-lg p-1 mb-2"
+        style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)' }}
+      >
+        {(['dictate', 'record'] as const).map((mode) => {
+          const active = hudMode === mode
+          const locked = isRecording || isPreparing || isProcessing
+          return (
+            <button
+              key={mode}
+              onClick={() => switchMode(mode)}
+              disabled={locked}
+              aria-pressed={active}
+              className="flex-1 min-h-[40px] flex items-center justify-center gap-2 rounded-md text-xs uppercase tracking-wider transition-colors disabled:cursor-not-allowed"
+              style={{
+                backgroundColor: active ? 'var(--accent-primary)' : 'transparent',
+                color: active ? '#fff' : 'var(--text-muted)',
+                opacity: locked && !active ? 0.5 : 1,
+              }}
+              title={mode === 'dictate'
+                ? 'Transcribe speech to text'
+                : 'Save audio only, no time limit. Transcribe later from Recordings.'}
+            >
+              {mode === 'dictate' ? <Mic size={14} /> : <Disc size={14} />}
+              {mode === 'dictate' ? 'Dictate' : 'Record'}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="shrink-0 flex flex-col items-center justify-center gap-3 pt-1">
         {/* Error */}
         {error && (
           <div className="text-xs px-3 py-1 rounded" style={{ color: 'var(--danger)', backgroundColor: 'var(--danger-bg)', border: '1px solid var(--danger)' }}>
@@ -536,9 +704,12 @@ export function DictationMode() {
           )}
 
           <button
-            onClick={isRecording ? handleStopRecording : handleStartRecording}
-            disabled={isProcessing || isPreparing || !canTranscribe}
-            className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg ${(!canTranscribe || isProcessing || isPreparing) ? 'opacity-50 cursor-not-allowed' : ''}`}
+            onClick={isRecording
+              ? (hudMode === 'record' ? handleStopCapture : handleStopRecording)
+              : (hudMode === 'record' ? handleStartCapture : handleStartRecording)}
+            disabled={isProcessing || isPreparing || (hudMode === 'dictate' && !canTranscribe)}
+            aria-label={isRecording ? 'Stop' : hudMode === 'record' ? 'Start recording' : 'Start dictation'}
+            className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg ${((hudMode === 'dictate' && !canTranscribe) || isProcessing || isPreparing) ? 'opacity-50 cursor-not-allowed' : ''}`}
             style={{
               backgroundColor: isPreparing ? 'var(--warning, #d97706)' : isRecording ? 'var(--danger)' : 'var(--accent-primary)',
               border: `2px solid ${isPreparing ? 'var(--warning, #d97706)' : isRecording ? 'var(--danger)' : 'var(--accent-hover)'}`
@@ -546,6 +717,10 @@ export function DictationMode() {
           >
             {isProcessing || isPreparing ? (
               <Loader2 className="w-5 h-5 text-white animate-spin" />
+            ) : hudMode === 'record' ? (
+              isRecording
+                ? <Square className="w-5 h-5 text-white" fill="currentColor" />
+                : <Disc className="w-5 h-5 text-white" />
             ) : isRecording ? (
               <MicOff className="w-5 h-5 text-white" />
             ) : (
@@ -584,8 +759,18 @@ export function DictationMode() {
         )}
 
         {/* Status */}
-        <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
-          {!canTranscribe
+        <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--text-muted)' }} aria-live="polite">
+          {hudMode === 'record'
+            ? (isProcessing
+              ? '◎ Saving...'
+              : isPreparing
+                ? '◎ Preparing mic, please wait...'
+                : isRecording
+                  ? `● Recording ${formatDuration(recordElapsed)}, click to stop`
+                  : savedNotice
+                    ? `✓ ${savedNotice}`
+                    : '○ Click to record (no time limit)')
+            : !canTranscribe
             ? 'Sign in & subscribe to start'
             : isPostProcessing
               ? '◎ AI cleanup...'
@@ -605,7 +790,9 @@ export function DictationMode() {
           ref={textareaRef}
           value={transcript}
           onChange={(e) => setTranscript(e.target.value)}
-          placeholder="Transcript appears here..."
+          placeholder={hudMode === 'record'
+            ? 'Transcribe a recording from the Recordings list to see its text here...'
+            : 'Transcript appears here...'}
           className="w-full flex-1 min-h-[60px] p-2 rounded text-sm resize-none focus:outline-none overflow-y-auto"
           style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
         />
@@ -635,8 +822,18 @@ export function DictationMode() {
           </button>
         </div>
       </div>
-      </>
-
+      </div>
+      {showRecordings && (
+        <RecordingsPanel
+          canTranscribe={canTranscribe}
+          user={user}
+          aiCleanupEnabled={aiCleanupEnabled}
+          onOpenTranscript={handleOpenTranscript}
+          onClose={() => setRecordingsOpen(false)}
+          highlightFile={lastSavedFile}
+        />
+      )}
+      </div>
     </div>
   )
 }

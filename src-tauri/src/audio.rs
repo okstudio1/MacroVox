@@ -24,6 +24,10 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// flooding (one line per 100 drops).
 static DROPPED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 
+/// Same idea for the record-only capture tap (frames the streaming writer
+/// thread could not accept in time).
+static TAP_DROPPED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
 // ── WAV encoding ─────────────────────────────────────────────────────────────
 
 /// Encodes interleaved f32 PCM samples as a RIFF/WAV byte vector.
@@ -97,12 +101,16 @@ const MAX_BUFFER_SAMPLES: usize = 16_000 * 60 * 5;
 ///   - If a Deepgram WebSocket session is active (`dg_sender` is `Some`),
 ///     converts the frame to i16 LE bytes and sends it over the channel for
 ///     real-time streaming.
+/// - Independently of `is_recording`, when a record-only session is active
+///   (`capture_tap` is `Some`), clones the frame into the tap channel for the
+///   streaming OGG Opus writer thread.
 pub fn process_audio_frame(
     data: &[f32],
     level: &Arc<Mutex<f64>>,
     buffer: &Arc<Mutex<Vec<f32>>>,
     is_recording: &Arc<Mutex<bool>>,
     dg_sender: &Arc<Mutex<Option<DgSender>>>,
+    capture_tap: &Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
 ) {
     if data.is_empty() {
         return;
@@ -112,6 +120,19 @@ pub fn process_audio_frame(
         (sum_sq / data.len() as f32).sqrt()
     };
     *lock_or_recover(level) = rms as f64;
+
+    // Record-only path: hand a copy of the frame to the streaming writer
+    // thread. Never blocks; a full channel drops the frame and a closed one
+    // (writer already finished) is ignored.
+    if let Some(tap) = lock_or_recover(capture_tap).as_ref() {
+        use std::sync::mpsc::TrySendError;
+        if let Err(TrySendError::Full(_)) = tap.try_send(data.to_vec()) {
+            let n = TAP_DROPPED_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 100 == 1 {
+                warn!("[audio] recorder channel full, dropped {n} frames so far");
+            }
+        }
+    }
 
     if *lock_or_recover(is_recording) {
         // Batch path: buffer raw f32 samples for WAV upload fallback.
@@ -166,6 +187,7 @@ pub fn build_input_stream(
     buffer: Arc<Mutex<Vec<f32>>>,
     is_recording: Arc<Mutex<bool>>,
     dg_sender: Arc<Mutex<Option<DgSender>>>,
+    capture_tap: Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let err_fn = |e| eprintln!("[MacroVox audio] stream error: {e}");
 
@@ -173,7 +195,14 @@ pub fn build_input_stream(
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config.config(),
             move |data: &[f32], _| {
-                process_audio_frame(data, &level, &buffer, &is_recording, &dg_sender)
+                process_audio_frame(
+                    data,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    &capture_tap,
+                )
             },
             err_fn,
             None,
@@ -182,7 +211,14 @@ pub fn build_input_stream(
             &config.config(),
             move |data: &[i16], _| {
                 let floats: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
+                process_audio_frame(
+                    &floats,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    &capture_tap,
+                );
             },
             err_fn,
             None,
@@ -191,7 +227,14 @@ pub fn build_input_stream(
             &config.config(),
             move |data: &[i32], _| {
                 let floats: Vec<f32> = data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
-                process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
+                process_audio_frame(
+                    &floats,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    &capture_tap,
+                );
             },
             err_fn,
             None,
@@ -203,7 +246,14 @@ pub fn build_input_stream(
                     .iter()
                     .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
                     .collect();
-                process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
+                process_audio_frame(
+                    &floats,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    &capture_tap,
+                );
             },
             err_fn,
             None,
@@ -270,6 +320,56 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    fn no_tap() -> Arc<Mutex<Option<crate::recorder::CaptureTap>>> {
+        Arc::new(Mutex::new(None))
+    }
+
+    #[test]
+    fn process_audio_frame_feeds_tap_even_when_not_recording() {
+        let level = Arc::new(Mutex::new(0.0f64));
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let is_recording = Arc::new(Mutex::new(false));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(4);
+        let tap = Arc::new(Mutex::new(Some(tx)));
+
+        process_audio_frame(
+            &[0.25, -0.25],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            &tap,
+        );
+
+        assert_eq!(rx.try_recv().unwrap(), vec![0.25, -0.25]);
+        assert!(
+            buffer.lock().unwrap().is_empty(),
+            "tap must not touch the dictation buffer"
+        );
+    }
+
+    #[test]
+    fn process_audio_frame_survives_full_or_closed_tap() {
+        let level = Arc::new(Mutex::new(0.0f64));
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let is_recording = Arc::new(Mutex::new(false));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(1);
+        let tap = Arc::new(Mutex::new(Some(tx)));
+
+        // Fill the channel, then push again: must neither block nor panic.
+        process_audio_frame(&[0.1], &level, &buffer, &is_recording, &no_sender(), &tap);
+        process_audio_frame(&[0.2], &level, &buffer, &is_recording, &no_sender(), &tap);
+        assert_eq!(rx.try_recv().unwrap(), vec![0.1]);
+        assert!(
+            rx.try_recv().is_err(),
+            "second frame was dropped, not queued"
+        );
+
+        // Receiver gone: sends fail silently.
+        drop(rx);
+        process_audio_frame(&[0.3], &level, &buffer, &is_recording, &no_sender(), &tap);
+    }
+
     #[test]
     fn process_audio_frame_updates_level() {
         let level = Arc::new(Mutex::new(0.0f64));
@@ -277,7 +377,14 @@ mod tests {
         let is_recording = Arc::new(Mutex::new(false));
 
         // RMS of [1.0, -1.0] = sqrt((1+1)/2) = 1.0
-        process_audio_frame(&[1.0, -1.0], &level, &buffer, &is_recording, &no_sender());
+        process_audio_frame(
+            &[1.0, -1.0],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            &no_tap(),
+        );
         let lvl = *level.lock().unwrap();
         assert!((lvl - 1.0).abs() < 1e-6, "level = {lvl}");
         assert!(
@@ -298,6 +405,7 @@ mod tests {
             &buffer,
             &is_recording,
             &no_sender(),
+            &no_tap(),
         );
         let buf = buffer.lock().unwrap().clone();
         assert_eq!(buf, vec![0.1, 0.2, 0.3]);
@@ -308,7 +416,7 @@ mod tests {
         let level = Arc::new(Mutex::new(0.5f64));
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let is_recording = Arc::new(Mutex::new(false));
-        process_audio_frame(&[], &level, &buffer, &is_recording, &no_sender());
+        process_audio_frame(&[], &level, &buffer, &is_recording, &no_sender(), &no_tap());
         // level unchanged
         assert!((0.5 - *level.lock().unwrap()).abs() < 1e-9);
     }
@@ -325,7 +433,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<DgMessage>(500);
         let dg_sender = Arc::new(Mutex::new(Some(tx)));
 
-        process_audio_frame(&[0.5, -0.5], &level, &buffer, &is_recording, &dg_sender);
+        process_audio_frame(
+            &[0.5, -0.5],
+            &level,
+            &buffer,
+            &is_recording,
+            &dg_sender,
+            &no_tap(),
+        );
 
         // Should have received one Pcm message.
         let msg = rx.blocking_recv().expect("expected Pcm message");
@@ -352,7 +467,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<DgMessage>(500);
         let dg_sender = Arc::new(Mutex::new(Some(tx)));
 
-        process_audio_frame(&[0.5], &level, &buffer, &is_recording, &dg_sender);
+        process_audio_frame(
+            &[0.5],
+            &level,
+            &buffer,
+            &is_recording,
+            &dg_sender,
+            &no_tap(),
+        );
 
         // Nothing should have been sent.
         assert!(rx.try_recv().is_err());
