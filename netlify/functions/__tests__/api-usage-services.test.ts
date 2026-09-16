@@ -39,13 +39,22 @@ function allowedServices(): string[] {
   return [...last.matchAll(/'([^']+)'/g)].map(m => m[1])
 }
 
-/** Service values the functions actually insert. */
+/**
+ * Service values the functions actually insert, whether written directly
+ * (`.insert({ service: '...' })`) or through `reserveQuota(client, userId,
+ * '...', limit)`, which is the atomic path both claude-proxy and
+ * deepgram-grant use.
+ */
 function loggedServices(): { file: string, service: string }[] {
   return readdirSync(FUNCTIONS_DIR)
     .filter(f => f.endsWith('.ts'))
     .flatMap(file => {
       const src = readFileSync(join(FUNCTIONS_DIR, file), 'utf8')
-      return [...src.matchAll(/service:\s*'([^']+)'/g)].map(m => ({ file, service: m[1] }))
+      const direct = [...src.matchAll(/service:\s*'([^']+)'/g)]
+        .map(m => ({ file, service: m[1] }))
+      const viaReserveQuota = [...src.matchAll(/reserveQuota\(\s*[^,]+,\s*[^,]+,\s*'([^']+)'/g)]
+        .map(m => ({ file, service: m[1] }))
+      return [...direct, ...viaReserveQuota]
     })
 }
 

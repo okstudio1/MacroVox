@@ -1,16 +1,17 @@
 /**
- * Supabase Edge Function — billing-portal
+ * Supabase Edge Function: billing-portal
  *
  * Opens the Stripe billing portal so the user can manage their subscription.
  * Called from the renderer via `supabase.functions.invoke('billing-portal', { body: { userId } })`.
  *
  * Required environment variables (set in Supabase dashboard → Settings → Edge Functions):
- *   STRIPE_SECRET_KEY — Stripe secret key
- *   SITE_URL          — Return URL after the portal session (https://macrovox.tech)
+ *   STRIPE_SECRET_KEY: Stripe secret key
+ *   SITE_URL: Return URL after the portal session (https://macrovox.tech)
  */
 
-import Stripe from 'npm:stripe@17'
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import Stripe from 'npm:stripe@17.7.0'
+import { createClient } from 'npm:@supabase/supabase-js@2.101.1'
+import { allowedOrigin } from '../_shared/origins.ts'
 
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY')!)
 const supabase = createClient(
@@ -18,11 +19,8 @@ const supabase = createClient(
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
 )
 
-const ALLOWED_ORIGINS = ['https://macrovox.tech', 'tauri://localhost', 'https://tauri.localhost']
-
 function getCorsHeaders(req: Request) {
-  const origin = (req.headers.get('origin') ?? '').toLowerCase()
-  const corsOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : null
+  const corsOrigin = allowedOrigin(req.headers.get('origin'))
   return {
     'Access-Control-Allow-Origin': corsOrigin || '',
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -32,8 +30,7 @@ function getCorsHeaders(req: Request) {
 
 Deno.serve(async (req) => {
   const corsHeaders = getCorsHeaders(req)
-  const origin = (req.headers.get('origin') ?? '').toLowerCase()
-  if (!ALLOWED_ORIGINS.includes(origin)) {
+  if (!allowedOrigin(req.headers.get('origin'))) {
     return new Response(JSON.stringify({ error: 'Origin not allowed' }), {
       status: 403,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -41,7 +38,13 @@ Deno.serve(async (req) => {
   }
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders })
+    return new Response(null, { status: 204, headers: corsHeaders })
+  }
+  if (req.method !== 'POST') {
+    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+      status: 405,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
   }
 
   try {

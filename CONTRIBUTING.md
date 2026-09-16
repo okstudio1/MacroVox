@@ -20,10 +20,10 @@ people who rely on adaptive technology day to day.
 
 - **Report bugs** using the bug report template.
 - **Request features** using the feature request template.
-- **Improve docs** — typos, clearer wording, missing context.
-- **Add tests** — both the Vitest (renderer) and `cargo test` (Rust) suites
+- **Improve docs** : typos, clearer wording, missing context.
+- **Add tests** : both the Vitest (renderer) and `cargo test` (Rust) suites
   have coverage gaps.
-- **Code changes** — see "Development setup" below.
+- **Code changes** : see "Development setup" below.
 
 If you are unsure whether a change is wanted, open an issue first to
 discuss. For larger features, please discuss before writing code so we can
@@ -57,9 +57,11 @@ Settings -> Keys.
 Run the same gates CI runs before you push:
 
 ```bash
-npm test                 # renderer unit tests (Vitest)
+npm test                 # renderer and Netlify tests (Vitest)
+npm run test:scripts     # build contracts
+npm run check:csp        # production CSP
 npm run test:rust        # Rust unit tests (cargo test)
-npx tsc --noEmit         # TypeScript type-check
+npm run typecheck         # TypeScript type-check
 npm run check:versions   # Cargo.lock tauri vs @tauri-apps/api major.minor match
 ```
 
@@ -70,15 +72,15 @@ pushing.
 
 Useful reading before opening a PR:
 
-- [`README.md`](README.md) — project structure and the renderer/backend split.
-- [`src-tauri/ARCHITECTURE.md`](src-tauri/ARCHITECTURE.md) — Rust backend:
+- [`README.md`](README.md) : project structure and the renderer/backend split.
+- [`src-tauri/ARCHITECTURE.md`](src-tauri/ARCHITECTURE.md) : Rust backend:
   audio capture, Deepgram streaming, voice buffer, IPC commands, state.
-- [`docs/LLM_ONBOARDING.md`](docs/LLM_ONBOARDING.md) — quick orientation.
-- [`docs/RELEASE.md`](docs/RELEASE.md) — how releases are cut and signed.
+- [`docs/LLM_ONBOARDING.md`](docs/LLM_ONBOARDING.md) : quick orientation.
+- [`docs/RELEASE.md`](docs/RELEASE.md) : how releases are cut and signed.
 
 ## Coding conventions
 
-- **TypeScript**: strict mode. Type-check with `npx tsc --noEmit`.
+- **TypeScript**: strict mode. Type-check with `npm run typecheck`.
 - **Rust**: format with `cargo fmt`, lint with `cargo clippy`.
 - **Comments**: TSDoc / rustdoc on exported APIs; inline comments only when
   the *why* is non-obvious. Don't describe what well-named code already does.

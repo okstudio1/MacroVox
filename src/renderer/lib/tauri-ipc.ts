@@ -22,7 +22,7 @@
  * Auth note (Phase 6): auth functions have been removed from this IPC bridge.
  * Import them from `./auth` instead:
  *   getUser, signInEmail, signUpEmail, signOut, signInWithOAuth,
- *   resetPassword, getSubscription, getManagedKeys, checkout, billingPortal
+ *   resetPassword, getSubscription, hasManagedTranscription, checkout, billingPortal
  */
 
 import { invoke } from '@tauri-apps/api/core'
@@ -54,12 +54,19 @@ export interface RecordingStopResult {
   transcript?: string
   confidence?: number
   duration?: number
+  sessionId?: number
+  limitReached?: boolean
   error?: string
 }
 
 export interface TranscriptEvent {
   transcript: string
   isFinal: boolean
+  sessionId: number
+}
+
+export interface DeepgramStartResult extends OkResult {
+  sessionId?: number
 }
 
 // ── Event helpers ─────────────────────────────────────────────────────────────
@@ -111,18 +118,18 @@ export const getAudioLevel = (): Promise<number> =>
 
 // ── Deepgram streaming ────────────────────────────────────────────────────────
 
-export const startDeepgram = (credential: DeepgramCredential): Promise<OkResult> =>
+export const startDeepgram = (credential: DeepgramCredential): Promise<DeepgramStartResult> =>
   invoke('deepgram_start', { credential })
 
-export const stopDeepgram = (): Promise<OkResult> =>
-  invoke('deepgram_stop')
+export const stopDeepgram = (sessionId?: number): Promise<RecordingStopResult> =>
+  invoke('deepgram_stop', { sessionId })
 
 export const onTranscript = (
   callback: (data: TranscriptEvent) => void,
 ): () => void => makeListener('deepgram:transcript', callback)
 
 export const onStreamingError = (
-  callback: (data: { error: string }) => void,
+  callback: (data: { error: string; sessionId: number }) => void,
 ): () => void => makeListener('deepgram:error', callback)
 
 // ── Buffered recording ────────────────────────────────────────────────────────
@@ -292,6 +299,11 @@ export const onQuickDictationStart = (callback: () => void): () => void =>
 
 export const onQuickDictationToggle = (callback: () => void): () => void =>
   makeListener('quick-dictation-toggle', callback)
+
+export const emitAuthStateChanged = (): Promise<void> => emit('auth-state-changed')
+
+export const onAuthStateChanged = (callback: () => void): (() => void) =>
+  makeListener<unknown>('auth-state-changed', () => callback())
 
 export const onThemeChange = (
   callback: (themeId: string) => void,

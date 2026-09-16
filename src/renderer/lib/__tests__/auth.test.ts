@@ -34,6 +34,7 @@ const { mockSupabase, mockOpen } = vi.hoisted(() => {
   const mockSignOut = vi.fn()
   const mockSignInWithOAuth = vi.fn()
   const mockResetPasswordForEmail = vi.fn()
+  const mockOnAuthStateChange = vi.fn()
   const mockFrom = vi.fn()
   const mockFunctionsInvoke = vi.fn()
 
@@ -47,6 +48,7 @@ const { mockSupabase, mockOpen } = vi.hoisted(() => {
         signOut: mockSignOut,
         signInWithOAuth: mockSignInWithOAuth,
         resetPasswordForEmail: mockResetPasswordForEmail,
+        onAuthStateChange: mockOnAuthStateChange,
       },
       from: mockFrom,
       functions: { invoke: mockFunctionsInvoke },
@@ -87,6 +89,9 @@ function singleResolves(data: unknown, error: unknown = null) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockSupabase.auth.onAuthStateChange.mockReturnValue({
+    data: { subscription: { unsubscribe: vi.fn() } },
+  })
   // Force production-mode branches by default; per-test overrides toggle DEV.
   vi.stubEnv('VITE_DEV_MODE', 'false')
 })
@@ -348,6 +353,25 @@ describe('hasManagedTranscription', () => {
     const r = await auth.hasManagedTranscription()
     expect(r.success).toBe(true)
     expect(r.entitled).toBe(false)
+  })
+})
+
+describe('onAuthStateChange', () => {
+  it('forwards the event kind and mapped user to lifecycle consumers', () => {
+    let listener: ((event: string, session: { user: object } | null) => void) | undefined
+    const unsubscribe = vi.fn()
+    mockSupabase.auth.onAuthStateChange.mockImplementation((callback: (event: string, session: { user: object } | null) => void) => {
+      listener = callback
+      return { data: { subscription: { unsubscribe } } }
+    })
+    const callback = vi.fn()
+    const cleanup = auth.onAuthStateChange(callback)
+
+    listener?.('TOKEN_REFRESHED', { user: fakeSupabaseUser() })
+
+    expect(callback).toHaveBeenCalledWith(expect.objectContaining({ id: 'user-1' }), 'TOKEN_REFRESHED')
+    cleanup()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
   })
 })
 

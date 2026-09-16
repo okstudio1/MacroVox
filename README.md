@@ -62,7 +62,7 @@ Grab the latest signed installer from the releases repo:
 
 **[Download MacroVox for Windows](https://github.com/okstudio1/macrovox-releases/releases/latest)**
 
-Run `MacroVox_<version>_x64-setup.exe`. It's EV-signed by OK Studio Inc., so there's no SmartScreen warning. The app updates itself: every launch it checks for a newer signed build and installs it in the background. The `.msi` is there for managed or enterprise deployment.
+Run `MacroVox_<version>_x64-setup.exe`, signed by OK Studio Inc. The `.msi` is available for managed deployment. Version 1.0.8 needs a manual installer upgrade: its updater was not mounted. The unreleased 1.0.9 source adds an update notice in the dictation window with an explicit install action. Windows reputation prompts can still vary by machine.
 
 ### Linux (beta)
 
@@ -84,7 +84,7 @@ Typing is a barrier for a lot of people. Repetitive strain, limited mobility, fa
 
 ## How it works
 
-Audio is captured natively in Rust (no browser mic prompts, low latency), streamed to [Deepgram](https://deepgram.com) Nova-3 for transcription, then handed to [Claude](https://anthropic.com) Haiku to fix speech-to-text slips, punctuation, and formatting. The cleaned text replaces the raw text on your clipboard a moment later, so you never wait on the AI pass.
+Audio is captured natively in Rust (no browser mic prompts, low latency), streamed to [Deepgram](https://deepgram.com) Nova-3 for transcription, then handed to [Claude](https://anthropic.com) Haiku to fix speech-to-text slips, punctuation, and formatting. After Stop, the app waits for Deepgram's final result before copying. AI cleanup runs afterward and may update the clipboard only while the same transcript remains current. It does not replace text already pasted into another application.
 
 ---
 
@@ -92,7 +92,7 @@ Audio is captured natively in Rust (no browser mic prompts, low latency), stream
 
 - **Real-time dictation.** Deepgram Nova-3 in streaming mode (words as you speak) or batch mode (higher accuracy after you stop).
 - **AI cleanup.** Claude Haiku polishes every transcript in the background: punctuation, capitalization, and obvious mis-hearings, without changing your meaning.
-- **Drop it anywhere.** Auto-copy and auto-paste put text on the clipboard and into the app you were using, the instant you stop. Native key injection via `enigo`.
+- **Drop it anywhere.** Auto-copy and optional auto-paste deliver the finalized transcript to the app you were using. Failed clipboard writes prevent auto-paste. Native key injection uses `enigo`.
 - **Global hotkey.** Toggle dictation from any app with a shortcut you choose (default `Ctrl+Space`).
 - **20 languages.** English, Spanish, French, German, Portuguese, Japanese, Korean, Chinese, and more. The cleanup prompt is language-aware.
 - **Smart number formatting.** Always digits, always words, or a context-aware Smart mode (digits for currency, dates, and measurements; words for small standalone numbers).
@@ -101,7 +101,7 @@ Audio is captured natively in Rust (no browser mic prompts, low latency), stream
 - **Bring your own keys.** Run the whole thing on your own Deepgram and Anthropic accounts, no subscription. [Details below](#bring-your-own-keys).
 - **Six themes.** MCRN, Mars, Belter, Earth, Protomolecule, and Laconia.
 - **Stays out of the way.** Lives in the system tray, always-on-top dictation window, drag it wherever you like.
-- **Signed and self-updating.** EV-signed Windows installer plus an in-app auto-updater.
+- **Signed Windows installer.** The 1.0.9 source adds a signed-update notice and user-initiated installation in the dictation window.
 
 > Screenshots and a short demo clip are on the way. (Want to contribute one? See [Contributing](#contributing).)
 
@@ -162,14 +162,21 @@ To develop against your own provider accounts instead, just paste your keys unde
 | Command | Description |
 |---|---|
 | `python run.py` | Start the dev environment (recommended) |
-| `npx tauri dev` | Start Tauri dev directly |
+| `npm run dev` | Start the full Tauri application |
 | `npm run build:renderer` | Build the renderer only (Vite) |
-| `npx tauri build` | Production build plus installer |
-| `npm test` | Renderer unit tests (Vitest) |
+| `npm run build` | Production native build and installer, requires signing setup |
+| `npm test` | Renderer and Netlify tests (Vitest) |
+| `npm run typecheck` | Renderer and Netlify TypeScript checks |
+| `npm run test:scripts` | Build contract regression tests |
+| `npm run check:csp` | Check the single production CSP and required origins |
 | `npm run test:rust` | Rust unit tests (cargo) |
-| `npm run check:versions` | Verify `tauri` and `@tauri-apps/api` major.minor match |
+| `npm run check:versions` | Verify app manifests and Tauri dependency versions agree |
 
 ---
+
+## Security and reliability update (1.0.9, unreleased)
+
+The fix branch addresses final-word truncation, stale cleanup, history races, and hosted billing/security findings. Source changes do not update the installed app or production services. Start with the [fix ledger and validation](docs/SECURITY_ARCHITECTURE_FIXES_2026-09-15.md), the [speech investigation](docs/DICTATION_CUTOFF_AND_LATENCY_REVIEW_2026-09-15.md), and the [backend migration runbook](docs/BACKEND_SECURITY_MIGRATION_2026-09-15.md). Managed speech uses short-lived grants; shared provider keys must be removed from client-readable storage and rotated during rollout.
 
 ## Architecture
 

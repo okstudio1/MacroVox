@@ -22,8 +22,30 @@
 
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, MutexGuard};
+
+static VOICE_BUFFER_TRANSACTION: Mutex<()> = Mutex::new(());
+static NEXT_RECORDING_ID: AtomicU64 = AtomicU64::new(1);
+static HISTORY_EPOCHS: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn transaction_lock() -> MutexGuard<'static, ()> {
+    VOICE_BUFFER_TRANSACTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn history_epoch(buffer_dir: &Path) -> u64 {
+    *HISTORY_EPOCHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(buffer_dir.to_path_buf())
+        .or_insert(1)
+}
 
 // ── Manifest types ───────────────────────────────────────────────────────────
 
@@ -81,7 +103,7 @@ pub struct VoiceBufferInfo {
 /// If the file exists but fails to parse (truncated write, disk corruption),
 /// the broken file is renamed to `manifest.json.bad-{timestamp}` so it's
 /// recoverable for debugging instead of being silently overwritten.
-pub fn load_manifest(buffer_dir: &Path) -> VoiceBufferManifest {
+fn load_manifest_unlocked(buffer_dir: &Path) -> VoiceBufferManifest {
     let path = buffer_dir.join("manifest.json");
     let Ok(data) = fs::read_to_string(&path) else {
         return VoiceBufferManifest::default();
@@ -100,8 +122,14 @@ pub fn load_manifest(buffer_dir: &Path) -> VoiceBufferManifest {
     }
 }
 
+#[cfg(test)]
+fn load_manifest(buffer_dir: &Path) -> VoiceBufferManifest {
+    let _transaction = transaction_lock();
+    load_manifest_unlocked(buffer_dir)
+}
+
 /// Writes the manifest to disk atomically (write to .tmp, then rename).
-pub fn save_manifest(buffer_dir: &Path, manifest: &VoiceBufferManifest) -> Result<(), String> {
+fn save_manifest_unlocked(buffer_dir: &Path, manifest: &VoiceBufferManifest) -> Result<(), String> {
     let path = buffer_dir.join("manifest.json");
     let tmp_path = buffer_dir.join("manifest.json.tmp");
     let json = serde_json::to_string_pretty(manifest)
@@ -111,26 +139,38 @@ pub fn save_manifest(buffer_dir: &Path, manifest: &VoiceBufferManifest) -> Resul
     Ok(())
 }
 
+#[cfg(test)]
+fn save_manifest(buffer_dir: &Path, manifest: &VoiceBufferManifest) -> Result<(), String> {
+    let _transaction = transaction_lock();
+    save_manifest_unlocked(buffer_dir, manifest)
+}
+
 /// Evicts oldest recordings until `current_size_bytes + new_size` fits
 /// within `max_size_bytes`. Deletes the WAV files from disk.
-pub fn evict_if_needed(buffer_dir: &Path, manifest: &mut VoiceBufferManifest, new_size: u64) {
+fn evict_if_needed(
+    buffer_dir: &Path,
+    manifest: &mut VoiceBufferManifest,
+    new_size: u64,
+) -> Result<(), String> {
     while manifest.current_size_bytes + new_size > manifest.max_size_bytes
         && !manifest.recordings.is_empty()
     {
-        let oldest = manifest.recordings.remove(0);
+        let oldest = &manifest.recordings[0];
         let file_path = buffer_dir.join(&oldest.file);
-        if let Err(e) = fs::remove_file(&file_path) {
-            warn!("[voice_buffer] Failed to delete {}: {e}", oldest.file);
-        } else {
+        if file_path.exists() {
+            fs::remove_file(&file_path)
+                .map_err(|e| format!("Failed to evict {}: {e}", oldest.file))?;
             debug!(
                 "[voice_buffer] Evicted {} ({} bytes)",
                 oldest.file, oldest.size_bytes
             );
         }
+        let oldest = manifest.recordings.remove(0);
         manifest.current_size_bytes = manifest
             .current_size_bytes
             .saturating_sub(oldest.size_bytes);
     }
+    Ok(())
 }
 
 /// Converts f32 PCM samples to i16 (clamped to [-1.0, 1.0]).
@@ -208,7 +248,8 @@ fn encode_opus(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u
 /// - Writes the file and updates the manifest
 ///
 /// Returns the filename of the saved recording on success.
-pub fn save_recording(
+#[cfg(test)]
+fn save_recording(
     buffer_dir: &Path,
     samples: &[f32],
     sample_rate: u32,
@@ -216,6 +257,30 @@ pub fn save_recording(
     transcript: &str,
     max_size_bytes: Option<u64>,
 ) -> Result<String, String> {
+    save_recording_at_epoch(
+        buffer_dir,
+        samples,
+        sample_rate,
+        channels,
+        transcript,
+        max_size_bytes,
+        history_epoch(buffer_dir),
+    )
+}
+
+pub(crate) fn save_recording_at_epoch(
+    buffer_dir: &Path,
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    transcript: &str,
+    max_size_bytes: Option<u64>,
+    expected_epoch: u64,
+) -> Result<String, String> {
+    let _transaction = transaction_lock();
+    if history_epoch(buffer_dir) != expected_epoch {
+        return Err("Voice history was cleared before this recording could be saved".to_string());
+    }
     if samples.is_empty() {
         return Err("No audio to save".to_string());
     }
@@ -246,19 +311,23 @@ pub fn save_recording(
 
     // Generate timestamp-based filename with milliseconds for uniqueness
     let now = chrono::Local::now();
-    let filename = format!("{}.{}", now.format("%Y-%m-%dT%H-%M-%S%.3f"), extension);
+    let recording_id = NEXT_RECORDING_ID.fetch_add(1, Ordering::Relaxed);
+    let filename = format!(
+        "{}-{recording_id}.{extension}",
+        now.format("%Y-%m-%dT%H-%M-%S%.3f"),
+    );
     let file_path = buffer_dir.join(&filename);
 
     let file_size = encoded_bytes.len() as u64;
 
     // Load manifest and apply max_size override if provided
-    let mut manifest = load_manifest(buffer_dir);
+    let mut manifest = load_manifest_unlocked(buffer_dir);
     if let Some(max) = max_size_bytes {
         manifest.max_size_bytes = max;
     }
 
     // Evict old recordings to make room
-    evict_if_needed(buffer_dir, &mut manifest, file_size);
+    evict_if_needed(buffer_dir, &mut manifest, file_size)?;
 
     // Write the encoded file
     fs::write(&file_path, &encoded_bytes)
@@ -277,7 +346,7 @@ pub fn save_recording(
     manifest.current_size_bytes += file_size;
 
     // Save manifest
-    save_manifest(buffer_dir, &manifest)?;
+    save_manifest_unlocked(buffer_dir, &manifest)?;
 
     debug!(
         "[voice_buffer] Saved {} ({:.1}s, {} bytes, {}/{} MB used)",
@@ -304,11 +373,14 @@ pub fn register_recording(
     size_bytes: u64,
     max_size_bytes: Option<u64>,
 ) -> Result<VoiceRecording, String> {
-    let mut manifest = load_manifest(buffer_dir);
+    // Held for the whole read-modify-write so a concurrent save or clear
+    // cannot interleave and lose this entry.
+    let _transaction = transaction_lock();
+    let mut manifest = load_manifest_unlocked(buffer_dir);
     if let Some(max) = max_size_bytes {
         manifest.max_size_bytes = max;
     }
-    evict_if_needed(buffer_dir, &mut manifest, size_bytes);
+    evict_if_needed(buffer_dir, &mut manifest, size_bytes)?;
 
     let entry = VoiceRecording {
         file: filename.to_string(),
@@ -319,7 +391,7 @@ pub fn register_recording(
     };
     manifest.recordings.push(entry.clone());
     manifest.current_size_bytes += size_bytes;
-    save_manifest(buffer_dir, &manifest)?;
+    save_manifest_unlocked(buffer_dir, &manifest)?;
 
     debug!(
         "[voice_buffer] Registered {} ({:.1}s, {} bytes, {}/{} MB used)",
@@ -402,10 +474,11 @@ fn timestamp_from_filename(filename: &str) -> Option<String> {
 /// decoded length at 16 kHz doesn't match it, the file is stretched and we
 /// resample to the correct length and re-encode.
 pub fn repair_stretched_recordings(buffer_dir: &Path) {
+    let _transaction = transaction_lock();
     if !buffer_dir.exists() {
         return;
     }
-    let mut manifest = load_manifest(buffer_dir);
+    let mut manifest = load_manifest_unlocked(buffer_dir);
     if manifest.recordings.is_empty() {
         return;
     }
@@ -497,7 +570,7 @@ pub fn repair_stretched_recordings(buffer_dir: &Path) {
 
     if repaired > 0 {
         manifest.current_size_bytes = new_total;
-        if let Err(e) = save_manifest(buffer_dir, &manifest) {
+        if let Err(e) = save_manifest_unlocked(buffer_dir, &manifest) {
             warn!("[voice_buffer] Repaired {repaired} files but manifest save failed: {e}");
         } else {
             debug!("[voice_buffer] Repaired {repaired} stretched recording(s)");
@@ -507,7 +580,8 @@ pub fn repair_stretched_recordings(buffer_dir: &Path) {
 
 /// Lists all recordings in the buffer, newest first.
 pub fn list_recordings(buffer_dir: &Path) -> Vec<VoiceRecording> {
-    let mut manifest = load_manifest(buffer_dir);
+    let _transaction = transaction_lock();
+    let mut manifest = load_manifest_unlocked(buffer_dir);
     // Sort by timestamp descending so newest recordings always appear first,
     // regardless of manifest insertion order.
     manifest
@@ -518,7 +592,8 @@ pub fn list_recordings(buffer_dir: &Path) -> Vec<VoiceRecording> {
 
 /// Returns buffer info (size, count, etc.).
 pub fn get_info(buffer_dir: &Path, enabled: bool) -> VoiceBufferInfo {
-    let manifest = load_manifest(buffer_dir);
+    let _transaction = transaction_lock();
+    let manifest = load_manifest_unlocked(buffer_dir);
     VoiceBufferInfo {
         enabled,
         max_size_bytes: manifest.max_size_bytes,
@@ -553,6 +628,7 @@ fn validate_filename(filename: &str) -> Result<(), String> {
 
 /// Reads a WAV file from the buffer and returns its bytes.
 pub fn get_audio(buffer_dir: &Path, filename: &str) -> Result<Vec<u8>, String> {
+    let _transaction = transaction_lock();
     validate_filename(filename)?;
     let path = buffer_dir.join(filename);
     fs::read(&path).map_err(|e| format!("Failed to read audio file: {e}"))
@@ -560,9 +636,10 @@ pub fn get_audio(buffer_dir: &Path, filename: &str) -> Result<Vec<u8>, String> {
 
 /// Deletes a single recording from the buffer.
 pub fn delete_recording(buffer_dir: &Path, filename: &str) -> Result<(), String> {
+    let _transaction = transaction_lock();
     validate_filename(filename)?;
 
-    let mut manifest = load_manifest(buffer_dir);
+    let mut manifest = load_manifest_unlocked(buffer_dir);
     let idx = manifest
         .recordings
         .iter()
@@ -579,21 +656,42 @@ pub fn delete_recording(buffer_dir: &Path, filename: &str) -> Result<(), String>
         fs::remove_file(&file_path).map_err(|e| format!("Failed to delete file: {e}"))?;
     }
 
-    save_manifest(buffer_dir, &manifest)?;
+    save_manifest_unlocked(buffer_dir, &manifest)?;
     debug!("[voice_buffer] Deleted {}", filename);
     Ok(())
 }
 
 /// Deletes all recordings and resets the manifest.
 pub fn clear_all(buffer_dir: &Path) -> Result<(), String> {
-    let manifest = load_manifest(buffer_dir);
-    for recording in &manifest.recordings {
+    let _transaction = transaction_lock();
+    let mut epochs = HISTORY_EPOCHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let epoch = epochs.entry(buffer_dir.to_path_buf()).or_insert(1);
+    *epoch = epoch.saturating_add(1);
+    drop(epochs);
+    let mut manifest = load_manifest_unlocked(buffer_dir);
+    let mut retained = Vec::new();
+    let mut errors = Vec::new();
+    for recording in manifest.recordings.drain(..) {
         let file_path = buffer_dir.join(&recording.file);
         if file_path.exists() {
-            let _ = fs::remove_file(&file_path);
+            if let Err(error) = fs::remove_file(&file_path) {
+                errors.push(format!("{}: {error}", recording.file));
+                retained.push(recording);
+            }
         }
     }
-    save_manifest(buffer_dir, &VoiceBufferManifest::default())?;
+    manifest.recordings = retained;
+    manifest.current_size_bytes = manifest.recordings.iter().map(|r| r.size_bytes).sum();
+    save_manifest_unlocked(buffer_dir, &manifest)?;
+    if !errors.is_empty() {
+        return Err(format!(
+            "Failed to delete {} recording(s): {}",
+            errors.len(),
+            errors.join("; "),
+        ));
+    }
     debug!("[voice_buffer] Cleared all recordings");
     Ok(())
 }
@@ -604,25 +702,27 @@ pub fn update_transcript(
     filename: &str,
     transcript: &str,
 ) -> Result<(), String> {
+    let _transaction = transaction_lock();
     validate_filename(filename)?;
-    let mut manifest = load_manifest(buffer_dir);
+    let mut manifest = load_manifest_unlocked(buffer_dir);
     let recording = manifest
         .recordings
         .iter_mut()
         .find(|r| r.file == filename)
         .ok_or_else(|| "Recording not found".to_string())?;
     recording.transcript = transcript.to_string();
-    save_manifest(buffer_dir, &manifest)?;
+    save_manifest_unlocked(buffer_dir, &manifest)?;
     debug!("[voice_buffer] Updated transcript for {}", filename);
     Ok(())
 }
 
 /// Updates the max buffer size in the manifest and evicts if needed.
 pub fn set_max_size(buffer_dir: &Path, max_size_bytes: u64) -> Result<(), String> {
-    let mut manifest = load_manifest(buffer_dir);
+    let _transaction = transaction_lock();
+    let mut manifest = load_manifest_unlocked(buffer_dir);
     manifest.max_size_bytes = max_size_bytes;
-    evict_if_needed(buffer_dir, &mut manifest, 0);
-    save_manifest(buffer_dir, &manifest)?;
+    evict_if_needed(buffer_dir, &mut manifest, 0)?;
+    save_manifest_unlocked(buffer_dir, &manifest)?;
     debug!(
         "[voice_buffer] Max size set to {} MB",
         max_size_bytes / (1024 * 1024)
@@ -1138,6 +1238,80 @@ mod tests {
         let after = load_manifest(&dir);
         assert_eq!(after.max_size_bytes, tight);
         assert_eq!(after.recordings.len(), 1, "shrinking cap must evict to fit");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn concurrent_saves_preserve_both_manifest_entries() {
+        let dir = temp_dir();
+        let first_dir = dir.clone();
+        let second_dir = dir.clone();
+        let first = std::thread::spawn(move || {
+            save_recording(&first_dir, &[0.1; 1600], 16_000, 1, "first", None)
+        });
+        let second = std::thread::spawn(move || {
+            save_recording(&second_dir, &[0.2; 1600], 16_000, 1, "second", None)
+        });
+
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        let manifest = load_manifest(&dir);
+        assert_eq!(manifest.recordings.len(), 2);
+        assert!(manifest
+            .recordings
+            .iter()
+            .any(|item| item.transcript == "first"));
+        assert!(manifest
+            .recordings
+            .iter()
+            .any(|item| item.transcript == "second"));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn clear_failure_keeps_failed_entry_in_manifest() {
+        let dir = temp_dir();
+        let blocked_name = "cannot-remove.ogg";
+        fs::create_dir_all(dir.join(blocked_name)).unwrap();
+        let manifest = VoiceBufferManifest {
+            current_size_bytes: 123,
+            recordings: vec![VoiceRecording {
+                file: blocked_name.to_string(),
+                timestamp: "2026-09-15T00:00:00Z".to_string(),
+                duration_secs: 1.0,
+                size_bytes: 123,
+                transcript: "keep me".to_string(),
+            }],
+            ..Default::default()
+        };
+        save_manifest(&dir, &manifest).unwrap();
+
+        assert!(clear_all(&dir).is_err());
+        let after = load_manifest(&dir);
+        assert_eq!(after.recordings.len(), 1);
+        assert_eq!(after.recordings[0].file, blocked_name);
+        assert_eq!(after.current_size_bytes, 123);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn queued_save_cannot_resurrect_history_after_clear() {
+        let dir = temp_dir();
+        let queued_epoch = history_epoch(&dir);
+        clear_all(&dir).unwrap();
+
+        let result = save_recording_at_epoch(
+            &dir,
+            &[0.1; 1600],
+            16_000,
+            1,
+            "must stay cleared",
+            None,
+            queued_epoch,
+        );
+
+        assert!(result.is_err());
+        assert!(load_manifest(&dir).recordings.is_empty());
         cleanup(&dir);
     }
 }
