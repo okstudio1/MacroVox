@@ -145,6 +145,12 @@ jobs:
   # `osv-scanner.toml` ignore entry with an expiry, rather than turning the
   # gate off for everything.
   #
+  # supabase/deno.lock is deliberately absent: osv-scanner 2.6.0 has no
+  # extractor for it and aborts the entire scan rather than skipping the file,
+  # which takes the npm and cargo coverage down with it. Those Deno imports are
+  # therefore not CVE-scanned here. Add the lockfile back once an extractor
+  # exists upstream.
+  #
   # upload-sarif stays false. Findings appear in the job summary and
   # annotations either way, and this repository is public, so uploading
   # would also publish unfixed advisories to the Security tab for anyone
@@ -161,7 +167,6 @@ jobs:
       scan-args: |-
         --lockfile=package-lock.json
         --lockfile=src-tauri/Cargo.lock
-        --lockfile=supabase/deno.lock
       fail-on-vuln: true
       upload-sarif: false
 
