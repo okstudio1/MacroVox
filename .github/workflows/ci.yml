@@ -133,3 +133,35 @@ jobs:
       - run: node supabase/tests/run-database.mjs
         env:
           TEST_DATABASE_URL: postgresql://postgres:local-ci-only@127.0.0.1:5432/postgres
+
+  # Third CVE source, alongside `npm audit` and `cargo audit` in the
+  # dependencies job. OSV covers ecosystems and advisories those two miss,
+  # and it reads the lockfiles directly rather than a package manager's own
+  # view of them.
+  #
+  # fail-on-vuln stays true. If an advisory lands that genuinely cannot be
+  # fixed before the next push (a transitive crate pinned by the Tauri
+  # dependency tree, for instance), quarantine that single ID in an
+  # `osv-scanner.toml` ignore entry with an expiry, rather than turning the
+  # gate off for everything.
+  #
+  # upload-sarif stays false. Findings appear in the job summary and
+  # annotations either way, and this repository is public, so uploading
+  # would also publish unfixed advisories to the Security tab for anyone
+  # watching. The permissions below are the ones the called workflow
+  # declares; a caller cannot grant a called workflow less than it asks for.
+  osv-scan:
+    name: OSV vulnerability scan
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
+    with:
+      scan-args: |-
+        --lockfile=package-lock.json
+        --lockfile=src-tauri/Cargo.lock
+        --lockfile=supabase/deno.lock
+      fail-on-vuln: true
+      upload-sarif: false
+

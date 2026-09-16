@@ -35,6 +35,23 @@
   one label, silently falling back to the default device. `device_label`
   recombines the two, which reproduces the old string exactly, so no migration
   is needed. `format_device_label` carries the format and is covered by tests.
+- **Updates are reachable from Settings.** A new Updates section shows the
+  installed version, checks on demand, and installs on request, so dismissing
+  the startup banner is no longer a dead end. `useUpdater` now also reports the
+  running version and whether a check actually completed, which is what lets
+  the UI distinguish "up to date" from "never checked" and stops a failed
+  network check from being displayed as current.
+- **The update path is documented and tested.**
+  [AUTO_UPDATE.md](AUTO_UPDATE.md) records the flow, what the minisign
+  verification does and does not cover, and the gaps: no Authenticode pin on
+  the installer, an unsigned manifest (which limits that attack to denial of
+  updates), the plugin's own write-then-execute window, and no download size
+  bound. Seven tests cover the states the UI depends on.
+- **OSV joins the CVE gates in CI.** `google/osv-scanner-action` v2.6.0 scans
+  `package-lock.json`, `src-tauri/Cargo.lock` and `supabase/deno.lock`
+  alongside the existing `npm audit` and `cargo audit`. Unfixable advisories
+  should be quarantined per-ID in an `osv-scanner.toml` rather than by
+  disabling the gate.
 - **Auto-paste reports injection failures instead of swallowing them.** The
   three `enigo` calls discarded their results, so a failed injection was
   indistinguishable from a target application that ignored the paste, and the
