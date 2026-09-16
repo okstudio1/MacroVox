@@ -1031,17 +1031,44 @@ pub fn dictation_auto_paste(app: AppHandle) -> OkResponse {
     }
 
     // Background thread: wait for focus to shift, then inject Ctrl+V.
+    //
+    // Every step is checked. A silent no-op here is indistinguishable from a
+    // target application that ignored the paste, and the transcript is already
+    // on the clipboard, so a failure is worth one line telling the user that.
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-            let _ = enigo.key(Key::Control, Direction::Press);
-            let _ = enigo.key(Key::Unicode('v'), Direction::Click);
-            let _ = enigo.key(Key::Control, Direction::Release);
+        match Enigo::new(&Settings::default()) {
+            Ok(mut enigo) => {
+                // `v` is only clicked once the modifier is actually down,
+                // otherwise the keystroke types a literal "v" into whatever
+                // the user was working in. A modifier that did go down is
+                // always released, or it stays stuck for their next keypress.
+                let outcome = match enigo.key(Key::Control, Direction::Press) {
+                    Err(e) => Err(format!("Ctrl press failed: {e}")),
+                    Ok(()) => {
+                        let clicked = enigo
+                            .key(Key::Unicode('v'), Direction::Click)
+                            .map_err(|e| format!("paste keystroke failed: {e}"));
+                        let released = enigo
+                            .key(Key::Control, Direction::Release)
+                            .map_err(|e| format!("Ctrl release failed: {e}"));
+                        clicked.and(released)
+                    }
+                };
+                match outcome {
+                    Ok(()) => info!(
+                        "[perf] auto_paste(enigo) completed in {}ms",
+                        t0.elapsed().as_millis()
+                    ),
+                    Err(reason) => warn!(
+                        "[auto-paste] {reason}. Transcript is on the clipboard; press Ctrl+V."
+                    ),
+                }
+            }
+            Err(e) => {
+                warn!("[auto-paste] injection unavailable: {e}. Transcript is on the clipboard.")
+            }
         }
-        info!(
-            "[perf] auto_paste(enigo) completed in {}ms",
-            t0.elapsed().as_millis()
-        );
     });
 
     OkResponse::ok()

@@ -35,6 +35,14 @@
   one label, silently falling back to the default device. `device_label`
   recombines the two, which reproduces the old string exactly, so no migration
   is needed. `format_device_label` carries the format and is covered by tests.
+- **Auto-paste reports injection failures instead of swallowing them.** The
+  three `enigo` calls discarded their results, so a failed injection was
+  indistinguishable from a target application that ignored the paste, and the
+  perf line claimed completion either way. Failures now log a warning naming
+  the step and reminding the user the transcript is on the clipboard. The
+  modifier is only followed by the `v` keystroke once it is actually down,
+  which prevents a stray literal "v" if the press fails, and a modifier that
+  did go down is always released so it cannot stay stuck.
 - **Auto-paste verified against the new enigo.** The `dictation_auto_paste` key
   sequence was exercised on a raw Win32 EDIT control, on the Windows 11 packaged
   Notepad, and in a Chromium window, each confirmed by copying the target's
