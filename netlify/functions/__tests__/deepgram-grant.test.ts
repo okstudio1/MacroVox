@@ -12,11 +12,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mockGetUser = vi.fn()
 const mockFrom = vi.fn()
+const mockRpc = vi.fn()
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
     auth: { getUser: mockGetUser },
     from: mockFrom,
+    rpc: mockRpc,
   }),
 }))
 
@@ -61,18 +63,6 @@ function mockProUser() {
         }),
       }
     }
-    if (table === 'api_usage') {
-      return {
-        select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({
-            eq: vi.fn().mockReturnValue({
-              gte: vi.fn().mockResolvedValue({ count: 0, error: null }),
-            }),
-          }),
-        }),
-        insert: vi.fn().mockResolvedValue(undefined),
-      }
-    }
     return {}
   })
 }
@@ -88,6 +78,7 @@ function mockGrantOk(token = 'granted-jwt') {
 describe('deepgram-grant', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockRpc.mockResolvedValue({ data: true, error: null })
   })
 
   it('returns 204 for OPTIONS preflight', async () => {
@@ -152,34 +143,26 @@ describe('deepgram-grant', () => {
     fetchSpy.mockRestore()
   })
 
-  it('returns 429 over the rate limit, and never calls Deepgram', async () => {
-    mockGetUser.mockResolvedValue({ data: { user: { id: 'user-123' } }, error: null })
-    mockFrom.mockImplementation((table: string) => {
-      if (table === 'subscriptions') {
-        return {
-          select: vi.fn().mockReturnValue({
-            eq: vi.fn().mockReturnValue({
-              single: vi.fn().mockResolvedValue({ data: { status: 'pro' }, error: null }),
-            }),
-          }),
-        }
-      }
-      return {
-        select: vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({
-            eq: vi.fn().mockReturnValue({
-              gte: vi.fn().mockResolvedValue({ count: 500, error: null }),
-            }),
-          }),
-        }),
-        insert: vi.fn().mockResolvedValue(undefined),
-      }
-    })
+  it('returns 429 when the atomic quota reservation is denied, and never calls Deepgram', async () => {
+    mockProUser()
+    mockRpc.mockResolvedValue({ data: false, error: null })
     const fetchSpy = mockGrantOk()
 
     const result = await handler(makeEvent(), {} as never, vi.fn())
 
     expect(result?.statusCode).toBe(429)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+
+  it('fails closed when quota storage is unavailable, and never calls Deepgram', async () => {
+    mockProUser()
+    mockRpc.mockResolvedValue({ data: null, error: { message: 'database down' } })
+    const fetchSpy = mockGrantOk()
+
+    const result = await handler(makeEvent(), {} as never, vi.fn())
+
+    expect(result?.statusCode).toBe(503)
     expect(fetchSpy).not.toHaveBeenCalled()
     fetchSpy.mockRestore()
   })
@@ -192,6 +175,18 @@ describe('deepgram-grant', () => {
 
     expect(result?.statusCode).toBe(200)
     expect(JSON.parse(result!.body as string)).toEqual({ access_token: 'granted-jwt', expires_in: 60 })
+    fetchSpy.mockRestore()
+  })
+
+  it('reserves quota under the service value the CHECK constraint allows', async () => {
+    mockProUser()
+    const fetchSpy = mockGrantOk()
+
+    await handler(makeEvent(), {} as never, vi.fn())
+
+    expect(mockRpc).toHaveBeenCalledWith('reserve_api_quota', expect.objectContaining({
+      p_service: 'deepgram_grant',
+    }))
     fetchSpy.mockRestore()
   })
 

@@ -25,7 +25,7 @@
  * responsive when the proxy is slow or unreachable.
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { ANTHROPIC_MODEL_CLEANUP, ANTHROPIC_API_URL, ANTHROPIC_VERSION, API } from '../config'
 import { supabase } from '../lib/supabase'
 
@@ -37,7 +37,22 @@ interface UsePostProcessingOptions {
 }
 
 export function usePostProcessing({ useProxy = false, userId }: UsePostProcessingOptions = {}) {
-  const [isPostProcessing, setIsPostProcessing] = useState(false)
+  const [inFlightCount, setInFlightCount] = useState(0)
+  const controllersRef = useRef(new Set<AbortController>())
+  const mountedRef = useRef(true)
+
+  const cancelPostProcessing = useCallback(() => {
+    for (const controller of controllersRef.current) controller.abort()
+    controllersRef.current.clear()
+  }, [])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      cancelPostProcessing()
+    }
+  }, [cancelPostProcessing, useProxy, userId])
 
   const postProcess = useCallback(async (rawTranscript: string): Promise<string | null> => {
     const context = localStorage.getItem('post_processing_context') || ''
@@ -59,9 +74,9 @@ export function usePostProcessing({ useProxy = false, userId }: UsePostProcessin
       if (!token) return null
     }
 
-    setIsPostProcessing(true)
-
     const controller = new AbortController()
+    controllersRef.current.add(controller)
+    setInFlightCount(count => count + 1)
     const timeoutId = setTimeout(() => controller.abort(), 15_000)
 
     try {
@@ -135,9 +150,14 @@ export function usePostProcessing({ useProxy = false, userId }: UsePostProcessin
       return null
     } finally {
       clearTimeout(timeoutId)
-      setIsPostProcessing(false)
+      controllersRef.current.delete(controller)
+      if (mountedRef.current) setInFlightCount(count => Math.max(0, count - 1))
     }
   }, [useProxy, userId])
 
-  return { postProcess, isPostProcessing }
+  return {
+    postProcess,
+    isPostProcessing: inFlightCount > 0,
+    cancelPostProcessing,
+  }
 }

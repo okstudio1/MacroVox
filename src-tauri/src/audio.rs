@@ -9,7 +9,7 @@
 use crate::deepgram_ws::{DgMessage, DgSender};
 use cpal::traits::DeviceTrait;
 use log::warn;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Lock a mutex, recovering from poison if a prior thread panicked.
@@ -87,10 +87,22 @@ pub fn f32_to_i16_bytes(samples: &[f32]) -> Vec<u8> {
 
 // ── Capture callback ──────────────────────────────────────────────────────────
 
-/// Maximum recording buffer size in f32 samples.
-/// At 16 kHz mono this is 5 minutes of audio (~18 MB of f32 data).
-/// Prevents unbounded memory growth if the renderer never calls recording_stop.
-const MAX_BUFFER_SAMPLES: usize = 16_000 * 60 * 5;
+/// Maximum amount of PCM retained for batch transcription and voice history.
+pub const MAX_RECORDING_DURATION_SECS: u64 = 5 * 60;
+pub const MAX_RECORDING_BUFFER_BYTES: usize = 128 * 1024 * 1024;
+
+/// Calculates the sample cap from the active device format and requested duration.
+/// The result is bounded against integer overflow on unusual device profiles.
+pub fn recording_sample_limit(sample_rate: u32, channels: u16, duration_secs: u64) -> usize {
+    let channel_count = usize::from(channels.max(1));
+    let samples = u64::from(sample_rate)
+        .saturating_mul(u64::from(channels.max(1)))
+        .saturating_mul(duration_secs);
+    let duration_limit = usize::try_from(samples).unwrap_or(usize::MAX);
+    let byte_limit =
+        (MAX_RECORDING_BUFFER_BYTES / std::mem::size_of::<f32>()) / channel_count * channel_count;
+    duration_limit.min(byte_limit)
+}
 
 /// Called from the cpal input-stream callback with a slice of f32 samples.
 ///
@@ -104,6 +116,7 @@ const MAX_BUFFER_SAMPLES: usize = 16_000 * 60 * 5;
 /// - Independently of `is_recording`, when a record-only session is active
 ///   (`capture_tap` is `Some`), clones the frame into the tap channel for the
 ///   streaming OGG Opus writer thread.
+#[allow(clippy::too_many_arguments)]
 pub fn process_audio_frame(
     data: &[f32],
     level: &Arc<Mutex<f64>>,
@@ -111,6 +124,8 @@ pub fn process_audio_frame(
     is_recording: &Arc<Mutex<bool>>,
     dg_sender: &Arc<Mutex<Option<DgSender>>>,
     capture_tap: &Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
+    max_buffer_samples: usize,
+    limit_reached: &Arc<AtomicBool>,
 ) {
     if data.is_empty() {
         return;
@@ -139,10 +154,15 @@ pub fn process_audio_frame(
         // Cap at MAX_BUFFER_SAMPLES to prevent unbounded memory growth.
         {
             let mut buf = lock_or_recover(buffer);
-            let remaining = MAX_BUFFER_SAMPLES.saturating_sub(buf.len());
+            let remaining = max_buffer_samples.saturating_sub(buf.len());
             if remaining > 0 {
                 let take = data.len().min(remaining);
                 buf.extend_from_slice(&data[..take]);
+                if take < data.len() {
+                    limit_reached.store(true, Ordering::Release);
+                }
+            } else {
+                limit_reached.store(true, Ordering::Release);
             }
         }
 
@@ -180,6 +200,7 @@ pub fn process_audio_frame(
 /// in `AppState::dg_sender` so the callback reflects live session changes.
 ///
 /// The returned `cpal::Stream` is paused; call `.play()` to start capture.
+#[allow(clippy::too_many_arguments)]
 pub fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
@@ -188,8 +209,14 @@ pub fn build_input_stream(
     is_recording: Arc<Mutex<bool>>,
     dg_sender: Arc<Mutex<Option<DgSender>>>,
     capture_tap: Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
+    limit_reached: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let err_fn = |e| eprintln!("[MacroVox audio] stream error: {e}");
+    let max_buffer_samples = recording_sample_limit(
+        config.sample_rate().0,
+        config.channels(),
+        MAX_RECORDING_DURATION_SECS,
+    );
 
     match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
@@ -202,6 +229,8 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
+                    max_buffer_samples,
+                    &limit_reached,
                 )
             },
             err_fn,
@@ -218,6 +247,8 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
+                    max_buffer_samples,
+                    &limit_reached,
                 );
             },
             err_fn,
@@ -234,6 +265,8 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
+                    max_buffer_samples,
+                    &limit_reached,
                 );
             },
             err_fn,
@@ -253,6 +286,8 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
+                    max_buffer_samples,
+                    &limit_reached,
                 );
             },
             err_fn,
@@ -339,6 +374,8 @@ mod tests {
             &is_recording,
             &no_sender(),
             &tap,
+            usize::MAX,
+            &no_limit(),
         );
 
         assert_eq!(rx.try_recv().unwrap(), vec![0.25, -0.25]);
@@ -357,8 +394,20 @@ mod tests {
         let tap = Arc::new(Mutex::new(Some(tx)));
 
         // Fill the channel, then push again: must neither block nor panic.
-        process_audio_frame(&[0.1], &level, &buffer, &is_recording, &no_sender(), &tap);
-        process_audio_frame(&[0.2], &level, &buffer, &is_recording, &no_sender(), &tap);
+        let send = |data: &[f32]| {
+            process_audio_frame(
+                data,
+                &level,
+                &buffer,
+                &is_recording,
+                &no_sender(),
+                &tap,
+                usize::MAX,
+                &no_limit(),
+            )
+        };
+        send(&[0.1]);
+        send(&[0.2]);
         assert_eq!(rx.try_recv().unwrap(), vec![0.1]);
         assert!(
             rx.try_recv().is_err(),
@@ -367,7 +416,11 @@ mod tests {
 
         // Receiver gone: sends fail silently.
         drop(rx);
-        process_audio_frame(&[0.3], &level, &buffer, &is_recording, &no_sender(), &tap);
+        send(&[0.3]);
+    }
+
+    fn no_limit() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
     }
 
     #[test]
@@ -384,6 +437,8 @@ mod tests {
             &is_recording,
             &no_sender(),
             &no_tap(),
+            usize::MAX,
+            &no_limit(),
         );
         let lvl = *level.lock().unwrap();
         assert!((lvl - 1.0).abs() < 1e-6, "level = {lvl}");
@@ -406,6 +461,8 @@ mod tests {
             &is_recording,
             &no_sender(),
             &no_tap(),
+            usize::MAX,
+            &no_limit(),
         );
         let buf = buffer.lock().unwrap().clone();
         assert_eq!(buf, vec![0.1, 0.2, 0.3]);
@@ -416,7 +473,16 @@ mod tests {
         let level = Arc::new(Mutex::new(0.5f64));
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let is_recording = Arc::new(Mutex::new(false));
-        process_audio_frame(&[], &level, &buffer, &is_recording, &no_sender(), &no_tap());
+        process_audio_frame(
+            &[],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            &no_tap(),
+            usize::MAX,
+            &no_limit(),
+        );
         // level unchanged
         assert!((0.5 - *level.lock().unwrap()).abs() < 1e-9);
     }
@@ -440,6 +506,8 @@ mod tests {
             &is_recording,
             &dg_sender,
             &no_tap(),
+            usize::MAX,
+            &no_limit(),
         );
 
         // Should have received one Pcm message.
@@ -474,10 +542,46 @@ mod tests {
             &is_recording,
             &dg_sender,
             &no_tap(),
+            usize::MAX,
+            &no_limit(),
         );
 
         // Nothing should have been sent.
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn duration_limit_accounts_for_sample_rate_and_channels() {
+        assert_eq!(recording_sample_limit(48_000, 2, 60), 5_760_000);
+    }
+
+    #[test]
+    fn duration_limit_has_a_hard_memory_ceiling_and_whole_frames() {
+        let limit = recording_sample_limit(u32::MAX, 7, u64::MAX);
+        assert!(limit * std::mem::size_of::<f32>() <= MAX_RECORDING_BUFFER_BYTES);
+        assert_eq!(limit % 7, 0);
+    }
+
+    #[test]
+    fn process_audio_frame_surfaces_buffer_limit() {
+        let level = Arc::new(Mutex::new(0.0f64));
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let is_recording = Arc::new(Mutex::new(true));
+        let limit_reached = no_limit();
+
+        process_audio_frame(
+            &[0.1, 0.2, 0.3],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            &no_tap(),
+            2,
+            &limit_reached,
+        );
+
+        assert_eq!(*buffer.lock().unwrap(), vec![0.1, 0.2]);
+        assert!(limit_reached.load(Ordering::Acquire));
     }
 
     // ── f32_to_i16_bytes ──────────────────────────────────────────────────────

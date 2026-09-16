@@ -20,6 +20,17 @@ function fail(code, msg) {
   process.exit(code)
 }
 
+// App versions must also match: the native config drives updater comparisons.
+const packageVersion = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf8')).version
+const configVersion = JSON.parse(readFileSync(resolve(ROOT, 'src-tauri/tauri.conf.json'), 'utf8')).version
+const cargoManifest = readFileSync(resolve(ROOT, 'src-tauri/Cargo.toml'), 'utf8')
+const cargoVersion = cargoManifest.match(/\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1]
+if (!cargoVersion || !packageVersion || !configVersion) fail(2, 'Could not read app versions')
+if (new Set([packageVersion, configVersion, cargoVersion]).size !== 1) {
+  fail(1, 'App version mismatch: package.json=' + packageVersion + ', tauri.conf.json=' + configVersion + ', Cargo.toml=' + cargoVersion)
+}
+console.log('App version parity OK: ' + packageVersion)
+
 // Cargo.lock: find the [[package]] block whose name is "tauri" (not
 // tauri-build/tauri-utils/etc.). Use a multiline regex with name-then-version
 // because version comes immediately after name in cargo's output.
@@ -30,7 +41,7 @@ const cargoMatch = cargoLock.match(
 if (!cargoMatch) fail(2, 'Could not find `tauri` package in src-tauri/Cargo.lock')
 const rustVersion = cargoMatch[1]
 
-// package-lock.json — npm v7+ format keys packages by node_modules path.
+// package-lock.json : npm v7+ format keys packages by node_modules path.
 const pkgLock = JSON.parse(readFileSync(resolve(ROOT, 'package-lock.json'), 'utf8'))
 const apiEntry = pkgLock.packages?.['node_modules/@tauri-apps/api']
 if (!apiEntry?.version) {

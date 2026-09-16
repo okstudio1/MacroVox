@@ -14,7 +14,7 @@
  * scheduled for a future phase.  Email auth is fully functional.
  */
 
-import type { User } from '@supabase/supabase-js'
+import type { AuthChangeEvent, User } from '@supabase/supabase-js'
 import { open } from '@tauri-apps/plugin-shell'
 import { supabase } from './supabase'
 
@@ -146,6 +146,14 @@ export async function signOut(): Promise<OkResult> {
   const { error } = await supabase.auth.signOut()
   if (error) return { success: false, error: error.message }
   return { success: true }
+}
+
+/** Subscribes to Supabase auth transitions in the current webview. */
+export function onAuthStateChange(callback: (user: AppUser | null, event: AuthChangeEvent) => void): () => void {
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    callback(session?.user ? mapUser(session.user) : null, event)
+  })
+  return () => subscription.unsubscribe()
 }
 
 /**

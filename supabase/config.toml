@@ -1,8 +1,8 @@
-# Supabase project config — only the fields we need to override.
+# Supabase project config, only the fields we need to override.
 # Generated for the stripe-webhook function which must accept unauthenticated
 # POSTs from Stripe. The function verifies Stripe's HMAC signature itself
 # (see supabase/functions/stripe-webhook/index.ts:40-44), so disabling the
-# platform JWT check here doesn't widen the attack surface — it just lets
+# platform JWT check here doesn't widen the attack surface. It just lets
 # the function code run.
 
 [functions.stripe-webhook]

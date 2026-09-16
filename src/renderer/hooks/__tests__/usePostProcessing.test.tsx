@@ -151,6 +151,30 @@ describe('usePostProcessing — happy path', () => {
     await pending
     await waitFor(() => expect(result.current.isPostProcessing).toBe(false))
   })
+
+  it('stays busy until every concurrent cleanup finishes', async () => {
+    const resolvers: Array<(value: unknown) => void> = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => (
+      new Promise(resolve => { resolvers.push(resolve) })
+    )))
+    const { result } = renderHook(() => usePostProcessing({ useProxy: true, userId: 'u' }))
+
+    let first: Promise<string | null> | undefined
+    let second: Promise<string | null> | undefined
+    act(() => {
+      first = result.current.postProcess('first')
+      second = result.current.postProcess('second')
+    })
+    await waitFor(() => expect(result.current.isPostProcessing).toBe(true))
+
+    resolvers[0]({ ok: true, json: async () => ({ content: [{ text: 'one' }] }) })
+    await first
+    expect(result.current.isPostProcessing).toBe(true)
+
+    resolvers[1]({ ok: true, json: async () => ({ content: [{ text: 'two' }] }) })
+    await second
+    await waitFor(() => expect(result.current.isPostProcessing).toBe(false))
+  })
 })
 
 describe('usePostProcessing — prompt safety', () => {

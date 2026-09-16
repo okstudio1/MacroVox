@@ -11,7 +11,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { Play, Square, Trash2, Loader2, Sparkles, Copy, Check, ArrowDownWideNarrow, ArrowUpNarrowWide } from 'lucide-react'
 import { usePostProcessing } from '../hooks/usePostProcessing'
 import * as ipc from '../lib/tauri-ipc'
-import { resolveDeepgramCredential } from '../lib/deepgramCredential'
+import { ownKey, resolveDeepgramCredential } from '../lib/deepgramCredential'
 import type { VoiceRecording } from '../lib/tauri-ipc'
 import { safeAudioMime } from '../lib/audio-mime'
 import { formatDuration, transcribeRecording } from '../lib/recordings'
@@ -30,6 +30,12 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
   const [copiedFile, setCopiedFile] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: string } | null>(null)
   const [sortNewestFirst, setSortNewestFirst] = useState(true)
+
+  // Whether reprocessing might work at all, not a guarantee: BYOK is checked
+  // here directly, but managed entitlement is only known once
+  // resolveDeepgramCredential() (in handleReprocess) actually asks for a grant.
+  const canReprocess = !!(user || ownKey())
+  const [actionError, setActionError] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -101,15 +107,24 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
   }
 
   const handleDelete = async (file: string) => {
+    setActionError(null)
+    setContextMenu(null)
     if (playingFile === file) {
       audioRef.current?.pause()
       audioRef.current = null
       setPlayingFile(null)
     }
-    await ipc.voiceBufferDelete(file)
-    setRecordings(prev => prev.filter(r => r.file !== file))
-    setContextMenu(null)
-    if (expandedFile === file) setExpandedFile(null)
+    try {
+      const result = await ipc.voiceBufferDelete(file)
+      if (!result.success) {
+        setActionError(result.error || 'Could not delete the recording')
+        return
+      }
+      setRecordings(prev => prev.filter(r => r.file !== file))
+      if (expandedFile === file) setExpandedFile(null)
+    } catch {
+      setActionError('Could not delete the recording')
+    }
   }
 
   const handleReprocess = async (file: string) => {
@@ -142,10 +157,19 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
   const handleCopyTranscript = async (file: string) => {
     const rec = recordings.find(r => r.file === file)
     if (!rec?.transcript) return
-    await ipc.copyToClipboard(rec.transcript)
-    setCopiedFile(file)
-    setTimeout(() => setCopiedFile(null), 2000)
+    setActionError(null)
     setContextMenu(null)
+    try {
+      const result = await ipc.copyToClipboard(rec.transcript)
+      if (!result.success) {
+        setActionError(result.error || 'Could not copy the transcript')
+        return
+      }
+      setCopiedFile(file)
+      setTimeout(() => setCopiedFile(null), 2000)
+    } catch {
+      setActionError('Could not copy the transcript')
+    }
   }
 
   const handleContextMenu = (e: React.MouseEvent, file: string) => {
@@ -198,6 +222,11 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
 
   return (
     <>
+      {actionError && (
+        <p role="alert" className="mb-2 text-xs" style={{ color: 'var(--danger, #ef4444)' }}>
+          {actionError}
+        </p>
+      )}
       {/* Sort toggle */}
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
@@ -282,7 +311,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
                     {copiedFile === rec.file ? <Check size={10} /> : <Copy size={10} />}
                     {copiedFile === rec.file ? 'Copied' : 'Copy'}
                   </button>
-                  {user && (
+                  {canReprocess && (
                     <button
                       onClick={() => handleReprocess(rec.file)}
                       disabled={reprocessingFile === rec.file}
@@ -327,7 +356,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
           >
             <Copy size={12} /> Copy transcript
           </button>
-          {user && (
+          {canReprocess && (
             <button
               onClick={() => handleReprocess(contextMenu.file)}
               disabled={reprocessingFile === contextMenu.file}

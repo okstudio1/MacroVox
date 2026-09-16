@@ -22,7 +22,10 @@
  *   1. Caller sends `Authorization: Bearer <supabase_jwt>`.
  *   2. This function verifies the JWT with Supabase.
  *   3. Checks the user has a Pro or Team subscription.
- *   4. Rate limits per user per hour.
+ *   4. Reserves quota atomically per user per hour, via the same
+ *      `reserve_api_quota` advisory-lock RPC claude-proxy uses (see
+ *      `_shared/quota.ts`). A SELECT-count-then-INSERT here would race under
+ *      concurrent requests and let a caller past the limit.
  *   5. Only then exchanges the managed key for a short-lived token.
  *
  * Response: { access_token: string, expires_in: number }
@@ -39,6 +42,7 @@
 
 import type { Handler } from '@netlify/functions'
 import { createClient } from '@supabase/supabase-js'
+import { reserveQuota } from './_shared/quota'
 
 const GRANT_URL = 'https://api.deepgram.com/v1/auth/grant'
 
@@ -47,9 +51,9 @@ const GRANT_URL = 'https://api.deepgram.com/v1/auth/grant'
 // pre-warm connect, not the recording. Short is the point.
 const TOKEN_TTL_SECONDS = 60
 
-const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000 // 1 hour
 // One grant per recording, plus the pre-warm at app start and a retry or two.
-// Well clear of normal dictation, low enough to notice a script.
+// Well clear of normal dictation, low enough to notice a script. Reserved
+// over a 1 hour window (reserveQuota's default) by reserve_api_quota.
 const RATE_LIMIT_MAX_CALLS = 500
 
 // Local dev: skip auth when running under `netlify dev`.
@@ -124,27 +128,19 @@ export const handler: Handler = async (event) => {
       return { statusCode: 403, headers: jsonHeaders, body: JSON.stringify({ error: 'Pro subscription required' }) }
     }
 
-    const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString()
-    const { count: recentCalls } = await supabase
-      .from('api_usage')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', user.id)
-      .eq('service', 'deepgram_grant')
-      .gte('created_at', windowStart)
-
-    if ((recentCalls ?? 0) >= RATE_LIMIT_MAX_CALLS) {
-      return {
-        statusCode: 429,
-        headers: { ...jsonHeaders, 'Retry-After': '3600' },
-        body: JSON.stringify({ error: 'Rate limit exceeded, try again later' }),
+    try {
+      const allowed = await reserveQuota(supabase, user.id, 'deepgram_grant', RATE_LIMIT_MAX_CALLS)
+      if (!allowed) {
+        return {
+          statusCode: 429,
+          headers: { ...jsonHeaders, 'Retry-After': '3600' },
+          body: JSON.stringify({ error: 'Rate limit exceeded, try again later' }),
+        }
       }
+    } catch (error) {
+      console.error('[deepgram-grant] Quota reservation failed:', error instanceof Error ? error.message : 'unknown')
+      return { statusCode: 503, headers: jsonHeaders, body: JSON.stringify({ error: 'Usage service unavailable' }) }
     }
-
-    supabase.from('api_usage').insert({ user_id: user.id, service: 'deepgram_grant' })
-      .then(
-        () => {},
-        err => console.error('[deepgram-grant] Failed to log API usage:', err),
-      )
   }
 
   const managedKey = process.env.DEEPGRAM_MANAGED_KEY
