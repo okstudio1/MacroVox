@@ -104,6 +104,29 @@ pub fn recording_sample_limit(sample_rate: u32, channels: u16, duration_secs: u6
     duration_limit.min(byte_limit)
 }
 
+/// How much audio the dictation buffer may accumulate, and where to report that
+/// the cap was hit.
+///
+/// The two always travel together: a cap with no way to signal that it was
+/// reached would silently truncate a recording.
+pub struct BufferCap<'a> {
+    pub max_samples: usize,
+    pub reached: &'a Arc<AtomicBool>,
+}
+
+/// The shared state one cpal input callback touches.
+///
+/// Every field is cloned from `AppState`, so the callback can outlive the call
+/// that built the stream.
+pub struct CaptureState {
+    pub level: Arc<Mutex<f64>>,
+    pub buffer: Arc<Mutex<Vec<f32>>>,
+    pub is_recording: Arc<Mutex<bool>>,
+    pub dg_sender: Arc<Mutex<Option<DgSender>>>,
+    pub capture_tap: Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
+    pub limit_reached: Arc<AtomicBool>,
+}
+
 /// Called from the cpal input-stream callback with a slice of f32 samples.
 ///
 /// - Updates `level` with the RMS value of the frame (always).
@@ -116,7 +139,6 @@ pub fn recording_sample_limit(sample_rate: u32, channels: u16, duration_secs: u6
 /// - Independently of `is_recording`, when a record-only session is active
 ///   (`capture_tap` is `Some`), clones the frame into the tap channel for the
 ///   streaming OGG Opus writer thread.
-#[allow(clippy::too_many_arguments)]
 pub fn process_audio_frame(
     data: &[f32],
     level: &Arc<Mutex<f64>>,
@@ -124,8 +146,7 @@ pub fn process_audio_frame(
     is_recording: &Arc<Mutex<bool>>,
     dg_sender: &Arc<Mutex<Option<DgSender>>>,
     capture_tap: &Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
-    max_buffer_samples: usize,
-    limit_reached: &Arc<AtomicBool>,
+    cap: BufferCap<'_>,
 ) {
     if data.is_empty() {
         return;
@@ -154,15 +175,15 @@ pub fn process_audio_frame(
         // Cap at MAX_BUFFER_SAMPLES to prevent unbounded memory growth.
         {
             let mut buf = lock_or_recover(buffer);
-            let remaining = max_buffer_samples.saturating_sub(buf.len());
+            let remaining = cap.max_samples.saturating_sub(buf.len());
             if remaining > 0 {
                 let take = data.len().min(remaining);
                 buf.extend_from_slice(&data[..take]);
                 if take < data.len() {
-                    limit_reached.store(true, Ordering::Release);
+                    cap.reached.store(true, Ordering::Release);
                 }
             } else {
-                limit_reached.store(true, Ordering::Release);
+                cap.reached.store(true, Ordering::Release);
             }
         }
 
@@ -200,17 +221,19 @@ pub fn process_audio_frame(
 /// in `AppState::dg_sender` so the callback reflects live session changes.
 ///
 /// The returned `cpal::Stream` is paused; call `.play()` to start capture.
-#[allow(clippy::too_many_arguments)]
 pub fn build_input_stream(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
-    level: Arc<Mutex<f64>>,
-    buffer: Arc<Mutex<Vec<f32>>>,
-    is_recording: Arc<Mutex<bool>>,
-    dg_sender: Arc<Mutex<Option<DgSender>>>,
-    capture_tap: Arc<Mutex<Option<crate::recorder::CaptureTap>>>,
-    limit_reached: Arc<AtomicBool>,
+    state: CaptureState,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    let CaptureState {
+        level,
+        buffer,
+        is_recording,
+        dg_sender,
+        capture_tap,
+        limit_reached,
+    } = state;
     let err_fn = |e| eprintln!("[MacroVox audio] stream error: {e}");
     let max_buffer_samples = recording_sample_limit(
         config.sample_rate().0,
@@ -229,8 +252,10 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
-                    max_buffer_samples,
-                    &limit_reached,
+                    BufferCap {
+                        max_samples: max_buffer_samples,
+                        reached: &limit_reached,
+                    },
                 )
             },
             err_fn,
@@ -247,8 +272,10 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
-                    max_buffer_samples,
-                    &limit_reached,
+                    BufferCap {
+                        max_samples: max_buffer_samples,
+                        reached: &limit_reached,
+                    },
                 );
             },
             err_fn,
@@ -265,8 +292,10 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
-                    max_buffer_samples,
-                    &limit_reached,
+                    BufferCap {
+                        max_samples: max_buffer_samples,
+                        reached: &limit_reached,
+                    },
                 );
             },
             err_fn,
@@ -286,8 +315,10 @@ pub fn build_input_stream(
                     &is_recording,
                     &dg_sender,
                     &capture_tap,
-                    max_buffer_samples,
-                    &limit_reached,
+                    BufferCap {
+                        max_samples: max_buffer_samples,
+                        reached: &limit_reached,
+                    },
                 );
             },
             err_fn,
@@ -374,8 +405,10 @@ mod tests {
             &is_recording,
             &no_sender(),
             &tap,
-            usize::MAX,
-            &no_limit(),
+            BufferCap {
+                max_samples: usize::MAX,
+                reached: &no_limit(),
+            },
         );
 
         assert_eq!(rx.try_recv().unwrap(), vec![0.25, -0.25]);
@@ -402,8 +435,10 @@ mod tests {
                 &is_recording,
                 &no_sender(),
                 &tap,
-                usize::MAX,
-                &no_limit(),
+                BufferCap {
+                    max_samples: usize::MAX,
+                    reached: &no_limit(),
+                },
             )
         };
         send(&[0.1]);
@@ -437,8 +472,10 @@ mod tests {
             &is_recording,
             &no_sender(),
             &no_tap(),
-            usize::MAX,
-            &no_limit(),
+            BufferCap {
+                max_samples: usize::MAX,
+                reached: &no_limit(),
+            },
         );
         let lvl = *level.lock().unwrap();
         assert!((lvl - 1.0).abs() < 1e-6, "level = {lvl}");
@@ -461,8 +498,10 @@ mod tests {
             &is_recording,
             &no_sender(),
             &no_tap(),
-            usize::MAX,
-            &no_limit(),
+            BufferCap {
+                max_samples: usize::MAX,
+                reached: &no_limit(),
+            },
         );
         let buf = buffer.lock().unwrap().clone();
         assert_eq!(buf, vec![0.1, 0.2, 0.3]);
@@ -480,8 +519,10 @@ mod tests {
             &is_recording,
             &no_sender(),
             &no_tap(),
-            usize::MAX,
-            &no_limit(),
+            BufferCap {
+                max_samples: usize::MAX,
+                reached: &no_limit(),
+            },
         );
         // level unchanged
         assert!((0.5 - *level.lock().unwrap()).abs() < 1e-9);
@@ -506,8 +547,10 @@ mod tests {
             &is_recording,
             &dg_sender,
             &no_tap(),
-            usize::MAX,
-            &no_limit(),
+            BufferCap {
+                max_samples: usize::MAX,
+                reached: &no_limit(),
+            },
         );
 
         // Should have received one Pcm message.
@@ -542,8 +585,10 @@ mod tests {
             &is_recording,
             &dg_sender,
             &no_tap(),
-            usize::MAX,
-            &no_limit(),
+            BufferCap {
+                max_samples: usize::MAX,
+                reached: &no_limit(),
+            },
         );
 
         // Nothing should have been sent.
@@ -576,8 +621,10 @@ mod tests {
             &is_recording,
             &no_sender(),
             &no_tap(),
-            2,
-            &limit_reached,
+            BufferCap {
+                max_samples: 2,
+                reached: &limit_reached,
+            },
         );
 
         assert_eq!(*buffer.lock().unwrap(), vec![0.1, 0.2]);

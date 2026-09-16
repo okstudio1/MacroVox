@@ -373,9 +373,40 @@ pub fn register_recording(
     size_bytes: u64,
     max_size_bytes: Option<u64>,
 ) -> Result<VoiceRecording, String> {
+    register_recording_at_epoch(
+        buffer_dir,
+        filename,
+        timestamp,
+        duration_secs,
+        size_bytes,
+        max_size_bytes,
+        history_epoch(buffer_dir),
+    )
+}
+
+/// As `register_recording`, but refuses to register if the history was cleared
+/// after `expected_epoch` was captured.
+///
+/// Record-only sessions run unbounded, so a clear can easily land between the
+/// start of a session and the moment its file is finalized. Without this the
+/// finalized file would be re-added to a manifest the user had just emptied.
+/// Capture the epoch when the session starts, not when it ends.
+pub(crate) fn register_recording_at_epoch(
+    buffer_dir: &Path,
+    filename: &str,
+    timestamp: String,
+    duration_secs: f64,
+    size_bytes: u64,
+    max_size_bytes: Option<u64>,
+    expected_epoch: u64,
+) -> Result<VoiceRecording, String> {
     // Held for the whole read-modify-write so a concurrent save or clear
     // cannot interleave and lose this entry.
     let _transaction = transaction_lock();
+    if history_epoch(buffer_dir) != expected_epoch {
+        let _ = fs::remove_file(buffer_dir.join(filename));
+        return Err("Voice history was cleared before this recording could be saved".to_string());
+    }
     let mut manifest = load_manifest_unlocked(buffer_dir);
     if let Some(max) = max_size_bytes {
         manifest.max_size_bytes = max;
@@ -1312,6 +1343,61 @@ mod tests {
 
         assert!(result.is_err());
         assert!(load_manifest(&dir).recordings.is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn record_only_session_cannot_resurrect_history_after_clear() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Epoch captured when the record-only session starts.
+        let session_epoch = history_epoch(&dir);
+
+        // User clears the history while the session is still running.
+        clear_all(&dir).unwrap();
+
+        // The session finishes and its finalized file lands on disk.
+        let name = "2026-09-16T10-00-00.000.ogg";
+        std::fs::write(dir.join(name), b"fake ogg").unwrap();
+
+        let result = register_recording_at_epoch(
+            &dir,
+            name,
+            "2026-09-16T10:00:00+01:00".to_string(),
+            12.0,
+            8,
+            None,
+            session_epoch,
+        );
+
+        assert!(result.is_err(), "stale session must not repopulate history");
+        assert!(load_manifest(&dir).recordings.is_empty());
+        assert!(
+            !dir.join(name).exists(),
+            "the orphaned file should be removed, not left behind"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn register_recording_still_works_without_an_intervening_clear() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "2026-09-16T11-00-00.000.ogg";
+        std::fs::write(dir.join(name), b"fake ogg").unwrap();
+
+        let entry = register_recording(
+            &dir,
+            name,
+            "2026-09-16T11:00:00+01:00".to_string(),
+            12.0,
+            8,
+            None,
+        )
+        .expect("registering without a clear should succeed");
+
+        assert_eq!(entry.file, name);
+        assert_eq!(load_manifest(&dir).recordings.len(), 1);
         cleanup(&dir);
     }
 }
