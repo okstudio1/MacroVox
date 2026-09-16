@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The Rust toolchain writes LF: rustfmt rewrites whole files and `tauri dev`
+# rewrites src-tauri/Cargo.toml on every run. Checking these out as CRLF made
+# them show as modified immediately afterwards, so pin them to LF and let the
+# tools and git agree.
+*.rs text eol=lf
+*.toml text eol=lf
