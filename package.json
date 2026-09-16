@@ -1,18 +1,14 @@
 {
   "name": "macrovox",
-  "version": "1.0.8",
-  "description": "MacroVox — Real-time voice dictation with AI cleanup",
-  "main": "dist/main/main.js",
+  "version": "1.0.9",
+  "description": "MacroVox: Real-time voice dictation with AI cleanup",
   "author": "OK Studio",
   "license": "MIT",
   "scripts": {
-    "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
+    "dev": "tauri dev",
     "dev:renderer": "vite",
-    "dev:main": "npx tsc -p config/tsconfig.main.json --watch",
-    "build": "npm run build:renderer && npm run build:main",
+    "build": "tauri build",
     "build:renderer": "vite build",
-    "clean:main": "node -e \"const fs=require('fs');const p=require('path');try{fs.rmSync(p.join(__dirname,'dist','main'),{recursive:true,force:true});fs.rmSync(p.join(__dirname,'config','tsconfig.main.tsbuildinfo'),{force:true})}catch(e){}\"",
-    "build:main": "npm run clean:main && npx tsc -p config/tsconfig.main.json",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
@@ -21,7 +17,10 @@
     "release:linux": "mkdir -p release/linux && cp -v src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/rpm/*.rpm release/linux/ 2>/dev/null; cp -v src-tauri/target/release/bundle/appimage/*.AppImage src-tauri/target/release/bundle/appimage/*.AppImage.sig src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz* release/linux/ 2>/dev/null; ls -lh release/linux/",
     "release:windows": "node -e \"const fs=require('fs'),path=require('path');fs.mkdirSync('release/windows',{recursive:true});const src='src-tauri/target/release/bundle';['nsis','msi'].forEach(d=>{const dir=path.join(src,d);if(fs.existsSync(dir))for(const f of fs.readdirSync(dir))if(/(\\.exe|\\.exe\\.sig|\\.msi|\\.msi\\.sig)$/.test(f))fs.copyFileSync(path.join(dir,f),path.join('release/windows',f))});console.log(fs.readdirSync('release/windows'))\"",
     "release:manifest": "node scripts/generate-latest.mjs",
-    "release:sbom": "node scripts/generate-sbom.mjs"
+    "release:sbom": "node scripts/generate-sbom.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p config/tsconfig.functions.json",
+    "check:csp": "node scripts/check-csp.mjs",
+    "test:scripts": "node --test scripts/__tests__/*.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.51.0",

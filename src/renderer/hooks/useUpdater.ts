@@ -1,9 +1,9 @@
 /**
  * useUpdater — checks for app updates on startup using Tauri's updater plugin.
  *
- * On launch, checks the configured endpoint for a newer version. If one is
- * available, shows a confirmation dialog and downloads + installs it.
- * The app restarts automatically after the update is applied.
+ * On launch, checks the configured endpoint for a newer version. The caller
+ * presents the result and can explicitly start installation. The app restarts
+ * after a successful update.
  */
 
 import { useState, useEffect, useCallback } from 'react'
@@ -59,7 +59,10 @@ export function useUpdater() {
     setState(prev => ({ ...prev, downloading: true, error: null }))
     try {
       const update = await check()
-      if (!update) return
+      if (!update) {
+        setState(prev => ({ ...prev, downloading: false, available: false }))
+        return
+      }
 
       await update.downloadAndInstall()
       await relaunch()

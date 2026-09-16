@@ -1,3 +1,4 @@
+use log::{debug, warn};
 /// MacroVox Tauri commands.
 ///
 /// Every command here mirrors one channel from the Electron preload
@@ -11,8 +12,9 @@
 ///   ✅ Phase 5 — enigo native paste (replaces PowerShell ~700 ms)
 ///   ✅ Phase 6 — auth stubs removed; Supabase JS SDK used from renderer
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
-use log::{debug, warn};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -108,15 +110,32 @@ fn parse_key_code(s: &str) -> Result<Code, String> {
             // multi-byte codepoints (where len() == 1 would not).
             let ch = s.chars().next().expect("count is 1").to_ascii_uppercase();
             match ch {
-                'A' => Ok(Code::KeyA), 'B' => Ok(Code::KeyB), 'C' => Ok(Code::KeyC),
-                'D' => Ok(Code::KeyD), 'E' => Ok(Code::KeyE), 'F' => Ok(Code::KeyF),
-                'G' => Ok(Code::KeyG), 'H' => Ok(Code::KeyH), 'I' => Ok(Code::KeyI),
-                'J' => Ok(Code::KeyJ), 'K' => Ok(Code::KeyK), 'L' => Ok(Code::KeyL),
-                'M' => Ok(Code::KeyM), 'N' => Ok(Code::KeyN), 'O' => Ok(Code::KeyO),
-                'P' => Ok(Code::KeyP), 'Q' => Ok(Code::KeyQ), 'R' => Ok(Code::KeyR),
-                'S' => Ok(Code::KeyS), 'T' => Ok(Code::KeyT), 'U' => Ok(Code::KeyU),
-                'V' => Ok(Code::KeyV), 'W' => Ok(Code::KeyW), 'X' => Ok(Code::KeyX),
-                'Y' => Ok(Code::KeyY), 'Z' => Ok(Code::KeyZ),
+                'A' => Ok(Code::KeyA),
+                'B' => Ok(Code::KeyB),
+                'C' => Ok(Code::KeyC),
+                'D' => Ok(Code::KeyD),
+                'E' => Ok(Code::KeyE),
+                'F' => Ok(Code::KeyF),
+                'G' => Ok(Code::KeyG),
+                'H' => Ok(Code::KeyH),
+                'I' => Ok(Code::KeyI),
+                'J' => Ok(Code::KeyJ),
+                'K' => Ok(Code::KeyK),
+                'L' => Ok(Code::KeyL),
+                'M' => Ok(Code::KeyM),
+                'N' => Ok(Code::KeyN),
+                'O' => Ok(Code::KeyO),
+                'P' => Ok(Code::KeyP),
+                'Q' => Ok(Code::KeyQ),
+                'R' => Ok(Code::KeyR),
+                'S' => Ok(Code::KeyS),
+                'T' => Ok(Code::KeyT),
+                'U' => Ok(Code::KeyU),
+                'V' => Ok(Code::KeyV),
+                'W' => Ok(Code::KeyW),
+                'X' => Ok(Code::KeyX),
+                'Y' => Ok(Code::KeyY),
+                'Z' => Ok(Code::KeyZ),
                 _ => Err(format!("Unknown key: {s}")),
             }
         }
@@ -126,7 +145,9 @@ fn parse_key_code(s: &str) -> Result<Code, String> {
 
 /// Lock a mutex, recovering from poison if a prior thread panicked.
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ── Shared response types ─────────────────────────────────────────────────────
@@ -140,10 +161,16 @@ pub struct OkResponse {
 
 impl OkResponse {
     pub fn ok() -> Self {
-        Self { success: true, error: None }
+        Self {
+            success: true,
+            error: None,
+        }
     }
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { success: false, error: Some(msg.into()) }
+        Self {
+            success: false,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -156,7 +183,7 @@ pub struct AudioDevicesResponse {
     pub error: Option<String>,
 }
 
-#[derive(serde::Serialize, Debug)]
+#[derive(serde::Serialize, Debug, Default)]
 pub struct RecordingStopResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +194,19 @@ pub struct RecordingStopResponse {
     pub duration: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<u64>,
+    #[serde(rename = "limitReached", skip_serializing_if = "Option::is_none")]
+    pub limit_reached: Option<bool>,
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct DeepgramStartResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<u64>,
 }
 
 // ── Audio ✅ Phase 3: cpal WASAPI native capture ───────────────────────────────
@@ -181,8 +221,16 @@ pub fn audio_list_devices(state: State<AppState>) -> AudioDevicesResponse {
         .unwrap_or_default();
     let devices = filter_device_list(devices);
     let selected = lock_or_recover(&state.selected_mic_device).clone();
-    debug!("[audio] devices found: {:?}, selected: {:?}", devices, selected);
-    AudioDevicesResponse { success: true, devices, selected, error: None }
+    debug!(
+        "[audio] devices found: {:?}, selected: {:?}",
+        devices, selected
+    );
+    AudioDevicesResponse {
+        success: true,
+        devices,
+        selected,
+        error: None,
+    }
 }
 
 /// On Linux, cpal's ALSA host enumerates dozens of virtual/alias devices
@@ -193,13 +241,33 @@ fn filter_device_list(devices: Vec<String>) -> Vec<String> {
     #[cfg(target_os = "linux")]
     {
         const NOISE_PREFIXES: &[&str] = &[
-            "sysdefault:", "front:", "rear:", "center_lfe:", "side:",
-            "surround21:", "surround40:", "surround41:", "surround50:",
-            "surround51:", "surround71:",
-            "iec958:", "spdif:", "hdmi:",
-            "dmix:", "dsnoop:", "hw:", "plughw:",
-            "modem:", "phoneline:", "upmix", "vdownmix",
-            "samplerate", "speexrate", "null", "jack", "oss",
+            "sysdefault:",
+            "front:",
+            "rear:",
+            "center_lfe:",
+            "side:",
+            "surround21:",
+            "surround40:",
+            "surround41:",
+            "surround50:",
+            "surround51:",
+            "surround71:",
+            "iec958:",
+            "spdif:",
+            "hdmi:",
+            "dmix:",
+            "dsnoop:",
+            "hw:",
+            "plughw:",
+            "modem:",
+            "phoneline:",
+            "upmix",
+            "vdownmix",
+            "samplerate",
+            "speexrate",
+            "null",
+            "jack",
+            "oss",
             "usbstream:",
         ];
         let mut out: Vec<String> = devices
@@ -239,7 +307,10 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
 
     let host = cpal::default_host();
     let device_name = lock_or_recover(&state.selected_mic_device).clone();
-    debug!("[audio] audio_start called, selected device: {:?}", device_name);
+    debug!(
+        "[audio] audio_start called, selected device: {:?}",
+        device_name
+    );
 
     // Find the requested device, or fall back to the system default.
     let device = if let Some(ref name) = device_name {
@@ -247,7 +318,10 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
             .ok()
             .and_then(|mut iter| iter.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
             .or_else(|| {
-                warn!("[audio] Device {:?} not found, falling back to default", name);
+                warn!(
+                    "[audio] Device {:?} not found, falling back to default",
+                    name
+                );
                 host.default_input_device()
             })
     } else {
@@ -267,8 +341,12 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
 
     let config = match device.default_input_config() {
         Ok(c) => {
-            debug!("[audio] Input config: {:?}ch @ {}Hz, format={:?}",
-                   c.channels(), c.sample_rate().0, c.sample_format());
+            debug!(
+                "[audio] Input config: {:?}ch @ {}Hz, format={:?}",
+                c.channels(),
+                c.sample_rate().0,
+                c.sample_format()
+            );
             c
         }
         Err(e) => {
@@ -286,8 +364,17 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
     let is_recording = Arc::clone(&state.is_recording);
 
     let dg_sender = Arc::clone(&state.dg_sender);
+    let limit_reached = Arc::clone(&state.recording_limit_reached);
 
-    match crate::audio::build_input_stream(&device, &config, level, buffer, is_recording, dg_sender) {
+    match crate::audio::build_input_stream(
+        &device,
+        &config,
+        level,
+        buffer,
+        is_recording,
+        dg_sender,
+        limit_reached,
+    ) {
         Ok(stream) => {
             if let Err(e) = stream.play() {
                 warn!("[audio] Failed to start stream: {e}");
@@ -307,6 +394,9 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
 /// Stops audio capture by dropping the cpal stream and zeroing the level meter.
 #[tauri::command]
 pub fn audio_stop(state: State<AppState>) -> OkResponse {
+    let _lifecycle = lock_or_recover(&state.deepgram_lifecycle);
+    *lock_or_recover(&state.is_recording) = false;
+    lock_or_recover(&state.dg_sender).take();
     *lock_or_recover(&state.audio_stream) = None;
     *lock_or_recover(&state.audio_level) = 0.0;
     OkResponse::ok()
@@ -338,9 +428,21 @@ pub fn audio_get_level(state: State<AppState>) -> f64 {
 #[tauri::command]
 pub async fn deepgram_start(
     api_key: String,
+    auth_scheme: Option<crate::deepgram_ws::AuthScheme>,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<OkResponse, String> {
+) -> Result<DeepgramStartResponse, String> {
+    let _start_guard = state.deepgram_start_lock.lock().await;
+    {
+        let _lifecycle = lock_or_recover(&state.deepgram_lifecycle);
+        if state.active_deepgram_session_id.load(Ordering::Acquire) != 0 {
+            return Ok(DeepgramStartResponse {
+                success: false,
+                error: Some("A Deepgram streaming session is already active".to_string()),
+                session_id: None,
+            });
+        }
+    }
     // Ensure the audio capture stream is running before opening the WebSocket.
     // Without this the cpal callback never fires and Deepgram receives no audio.
     {
@@ -350,7 +452,11 @@ pub async fn deepgram_start(
             let res = audio_start(state.clone());
             if !res.success {
                 warn!("[deepgram] Failed to start audio: {:?}", res.error);
-                return Ok(res);
+                return Ok(DeepgramStartResponse {
+                    success: false,
+                    error: res.error,
+                    session_id: None,
+                });
             }
         }
     }
@@ -360,25 +466,93 @@ pub async fn deepgram_start(
     let keywords = lock_or_recover(&state.deepgram_keywords).clone();
     let number_format = lock_or_recover(&state.number_format).clone();
     let language = lock_or_recover(&state.transcription_language).clone();
-    debug!("[deepgram] Starting session: {}Hz, {}ch, {} keywords, numbers={}, lang={}",
-           sample_rate, channels, keywords.len(), number_format, language);
+    let session_id = state
+        .next_deepgram_session_id
+        .fetch_add(1, Ordering::AcqRel);
+    debug!(
+        "[deepgram] Starting session: {}Hz, {}ch, {} keywords, numbers={}, lang={}",
+        sample_rate,
+        channels,
+        keywords.len(),
+        number_format,
+        language
+    );
+    {
+        let _lifecycle = lock_or_recover(&state.deepgram_lifecycle);
+        if state.active_deepgram_session_id.load(Ordering::Acquire) != 0 {
+            return Ok(DeepgramStartResponse {
+                success: false,
+                error: Some("A Deepgram streaming session is already active".to_string()),
+                session_id: None,
+            });
+        }
+        state
+            .active_deepgram_session_id
+            .store(session_id, Ordering::Release);
+    }
 
-    match crate::deepgram_ws::start_session(&api_key, sample_rate, channels, &keywords, &number_format, &language, app).await {
+    match crate::deepgram_ws::start_session(crate::deepgram_ws::DeepgramSessionConfig {
+        api_key: &api_key,
+        sample_rate,
+        channels,
+        keywords: &keywords,
+        number_format: &number_format,
+        language: &language,
+        auth_scheme: auth_scheme.unwrap_or_default(),
+        session_id,
+        app,
+    })
+    .await
+    {
         Ok(sender) => {
+            let _lifecycle = lock_or_recover(&state.deepgram_lifecycle);
+            if state.active_deepgram_session_id.load(Ordering::Acquire) != session_id {
+                *lock_or_recover(&state.is_recording) = false;
+                *lock_or_recover(&state.audio_stream) = None;
+                *lock_or_recover(&state.audio_level) = 0.0;
+                return Ok(DeepgramStartResponse {
+                    success: false,
+                    error: Some("Deepgram streaming session ended during startup".to_string()),
+                    session_id: None,
+                });
+            }
             debug!("[deepgram] WebSocket session established");
             // Replace any existing sender first — on a double-start the previous
             // background task is signaled to close so it can drop its WebSocket
             // and stop counting against quota. Without this it would orphan.
             if let Some(old) = lock_or_recover(&state.dg_sender).replace(sender) {
-                let _ = old.try_send(crate::deepgram_ws::DgMessage::Stop);
+                let (completion, _ignored) = tokio::sync::oneshot::channel();
+                let _ = old.try_send(crate::deepgram_ws::DgMessage::Stop { completion });
             }
             lock_or_recover(&state.recording_buffer).clear();
+            state
+                .recording_limit_reached
+                .store(false, Ordering::Release);
             *lock_or_recover(&state.is_recording) = true;
-            Ok(OkResponse::ok())
+            Ok(DeepgramStartResponse {
+                success: true,
+                error: None,
+                session_id: Some(session_id),
+            })
         }
         Err(e) => {
             warn!("[deepgram] Failed to start session: {e}");
-            Ok(OkResponse::err(e))
+            let _lifecycle = lock_or_recover(&state.deepgram_lifecycle);
+            let owned_session = state
+                .active_deepgram_session_id
+                .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+            if owned_session {
+                lock_or_recover(&state.dg_sender).take();
+                *lock_or_recover(&state.is_recording) = false;
+                *lock_or_recover(&state.audio_stream) = None;
+                *lock_or_recover(&state.audio_level) = 0.0;
+            }
+            Ok(DeepgramStartResponse {
+                success: false,
+                error: Some(e),
+                session_id: None,
+            })
         }
     }
 }
@@ -389,17 +563,128 @@ pub async fn deepgram_start(
 /// `{"type":"CloseStream"}` to Deepgram and drains any final transcript
 /// fragments before exiting.  Any remaining `"deepgram:transcript"` events
 /// will still arrive in the renderer before the socket closes.
+fn invalidate_streaming_session(state: &AppState, session_id: u64) {
+    state.clear_deepgram_session_if_active(session_id);
+}
+
 #[tauri::command]
-pub fn deepgram_stop(state: State<AppState>) -> OkResponse {
+pub async fn deepgram_stop(
+    session_id: Option<u64>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingStopResponse, String> {
+    let lifecycle = lock_or_recover(&state.deepgram_lifecycle);
+    let active_session = state.active_deepgram_session_id.load(Ordering::Acquire);
+    if active_session == 0 || session_id.is_some_and(|id| id != active_session) {
+        return Ok(RecordingStopResponse {
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: None,
+            error: Some("Streaming session is no longer active".to_string()),
+            session_id: Some(active_session).filter(|id| *id != 0),
+            limit_reached: None,
+        });
+    }
     *lock_or_recover(&state.is_recording) = false;
+    *lock_or_recover(&state.audio_stream) = None;
+    *lock_or_recover(&state.audio_level) = 0.0;
+    let samples = std::mem::take(&mut *lock_or_recover(&state.recording_buffer));
+    let sample_count = samples.len();
+    let sample_rate = (*lock_or_recover(&state.audio_sample_rate)).max(1);
+    let channels = (*lock_or_recover(&state.audio_channels)).max(1);
+    let duration = sample_count as f64 / (sample_rate as f64 * channels as f64);
+    let limit_reached = state.recording_limit_reached.load(Ordering::Acquire);
+    let voice_history = if *lock_or_recover(&state.voice_buffer_enabled) {
+        let dir = lock_or_recover(&state.voice_buffer_dir).clone();
+        let max_size = *lock_or_recover(&state.voice_buffer_max_size);
+        if dir.as_os_str().is_empty() {
+            None
+        } else {
+            let epoch = crate::voice_buffer::history_epoch(&dir);
+            Some((dir, max_size, epoch))
+        }
+    } else {
+        None
+    };
 
     // Take the sender out of state — dropping it signals the task to close,
     // but sending Stop first gives Deepgram a chance to flush its buffer.
-    if let Some(sender) = lock_or_recover(&state.dg_sender).take() {
-        let _ = sender.try_send(crate::deepgram_ws::DgMessage::Stop);
+    let sender = lock_or_recover(&state.dg_sender).take();
+    drop(lifecycle);
+    let Some(sender) = sender else {
+        invalidate_streaming_session(&state, active_session);
+        return Ok(RecordingStopResponse {
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: Some(duration),
+            error: Some("Deepgram streaming worker is unavailable".to_string()),
+            session_id: Some(active_session),
+            limit_reached: Some(limit_reached),
+        });
+    };
+    let (completion, finished) = tokio::sync::oneshot::channel();
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        sender.send(crate::deepgram_ws::DgMessage::Stop { completion }),
+    )
+    .await
+    .map_or(true, |result| result.is_err())
+    {
+        invalidate_streaming_session(&state, active_session);
+        return Ok(RecordingStopResponse {
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: Some(duration),
+            error: Some("Deepgram streaming worker stopped unexpectedly".to_string()),
+            session_id: Some(active_session),
+            limit_reached: Some(limit_reached),
+        });
     }
-
-    OkResponse::ok()
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), finished)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_else(|| crate::deepgram_ws::StreamingStopResult {
+            transcript: String::new(),
+            error: Some("Timed out stopping Deepgram streaming worker".to_string()),
+        });
+    if result.error.as_deref() == Some("Timed out stopping Deepgram streaming worker") {
+        invalidate_streaming_session(&state, active_session);
+    }
+    let success = result.error.is_none();
+    if let Some(transcript) = Some(result.transcript.clone()).filter(|text| !text.is_empty()) {
+        if let Some((dir, max_size, history_epoch)) = voice_history.filter(|_| !samples.is_empty())
+        {
+            tauri::async_runtime::spawn_blocking(move || {
+                match crate::voice_buffer::save_recording_at_epoch(
+                    &dir,
+                    &samples,
+                    sample_rate,
+                    channels,
+                    &transcript,
+                    Some(max_size),
+                    history_epoch,
+                ) {
+                    Ok(_) => {
+                        let _ = app.emit("voice-buffer-updated", ());
+                    }
+                    Err(error) => warn!("[voice_buffer] Streaming auto-save failed: {error}"),
+                }
+            });
+        }
+    }
+    Ok(RecordingStopResponse {
+        success,
+        transcript: Some(result.transcript).filter(|text| !text.is_empty()),
+        confidence: None,
+        duration: Some(duration),
+        error: result.error,
+        session_id: Some(active_session),
+        limit_reached: Some(limit_reached),
+    })
 }
 
 // ── Buffered recording ✅ Phase 3 ─────────────────────────────────────────────
@@ -419,6 +704,9 @@ pub fn recording_start(state: State<AppState>) -> OkResponse {
         }
     }
     lock_or_recover(&state.recording_buffer).clear();
+    state
+        .recording_limit_reached
+        .store(false, Ordering::Release);
     *lock_or_recover(&state.is_recording) = true;
     OkResponse::ok()
 }
@@ -434,14 +722,30 @@ pub fn recording_start(state: State<AppState>) -> OkResponse {
 #[tauri::command]
 pub async fn recording_stop(
     api_key: String,
+    auth_scheme: Option<crate::deepgram_ws::AuthScheme>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<RecordingStopResponse, String> {
     // --- Stop recording and drain the buffer synchronously ---
     *lock_or_recover(&state.is_recording) = false;
+    *lock_or_recover(&state.audio_stream) = None;
+    *lock_or_recover(&state.audio_level) = 0.0;
     let samples = std::mem::take(&mut *lock_or_recover(&state.recording_buffer));
     let sample_rate = *lock_or_recover(&state.audio_sample_rate);
     let channels = *lock_or_recover(&state.audio_channels);
+    let limit_reached = state.recording_limit_reached.load(Ordering::Acquire);
+    let voice_history = if *lock_or_recover(&state.voice_buffer_enabled) {
+        let dir = lock_or_recover(&state.voice_buffer_dir).clone();
+        let max_size = *lock_or_recover(&state.voice_buffer_max_size);
+        if dir.as_os_str().is_empty() {
+            None
+        } else {
+            let epoch = crate::voice_buffer::history_epoch(&dir);
+            Some((dir, max_size, epoch))
+        }
+    } else {
+        None
+    };
     // State locks released here — safe to await below.
 
     if samples.is_empty() {
@@ -451,6 +755,8 @@ pub async fn recording_stop(
             confidence: None,
             duration: None,
             error: Some("No audio was captured".to_string()),
+            session_id: None,
+            limit_reached: Some(limit_reached),
         });
     }
 
@@ -477,10 +783,14 @@ pub async fn recording_stop(
         url.push_str(&format!("&keyterm={}", urlencoding::encode(kw)));
     }
 
-    let client = reqwest::Client::new();
-    let resp = match client
+    let request_started = Instant::now();
+    let resp = match state
+        .http_client
         .post(&url)
-        .header("Authorization", format!("Token {api_key}"))
+        .header(
+            "Authorization",
+            auth_scheme.unwrap_or_default().authorization(&api_key),
+        )
         .header("Content-Type", "audio/wav")
         .body(wav)
         .send()
@@ -494,20 +804,28 @@ pub async fn recording_stop(
                 confidence: None,
                 duration: Some(duration),
                 error: Some(format!("Deepgram request failed: {e}")),
+                session_id: None,
+                limit_reached: Some(limit_reached),
             })
         }
     };
 
     let status = resp.status();
+    debug!(
+        "[recording] Deepgram request completed: status={}, elapsed_ms={}",
+        status,
+        request_started.elapsed().as_millis(),
+    );
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        warn!("[recording] Deepgram returned {}: {}", status, &text[..text.len().min(200)]);
+        warn!("[recording] Deepgram returned status {}", status);
         return Ok(RecordingStopResponse {
             success: false,
             transcript: None,
             confidence: None,
             duration: Some(duration),
             error: Some(format!("Deepgram error ({})", status)),
+            session_id: None,
+            limit_reached: Some(limit_reached),
         });
     }
 
@@ -520,6 +838,8 @@ pub async fn recording_stop(
                 confidence: None,
                 duration: Some(duration),
                 error: Some(format!("Invalid Deepgram response: {e}")),
+                session_id: None,
+                limit_reached: Some(limit_reached),
             });
         }
     };
@@ -542,29 +862,32 @@ pub async fn recording_stop(
             // All state is captured into owned locals here so a concurrent
             // settings_broadcast can't change voice_buffer_dir/max_size between
             // this point and when the background thread actually writes.
-            let vb_enabled = *lock_or_recover(&state.voice_buffer_enabled);
-            if vb_enabled && !transcript_text.is_empty() {
-                let dir = lock_or_recover(&state.voice_buffer_dir).clone();
-                let max_size = *lock_or_recover(&state.voice_buffer_max_size);
+            if let Some((dir, max_size, history_epoch)) =
+                voice_history.filter(|_| !transcript_text.is_empty())
+            {
                 let transcript_clone = transcript_text.clone();
-                if !dir.as_os_str().is_empty() {
-                    // Clone the AppHandle so the background thread can notify
-                    // webviews. Without this, the settings window's recordings
-                    // list stays frozen at whatever was on disk when its
-                    // WebView2 first loaded, since batch mode never round-trips
-                    // through the renderer's voice_buffer_save path.
-                    let app_handle = app.clone();
-                    std::thread::spawn(move || {
-                        match crate::voice_buffer::save_recording(
-                            &dir, &samples, safe_sample_rate, safe_channels, &transcript_clone, Some(max_size),
-                        ) {
-                            Ok(_) => {
-                                let _ = app_handle.emit("voice-buffer-updated", ());
-                            }
-                            Err(e) => warn!("[voice_buffer] Auto-save failed: {e}"),
+                // Clone the AppHandle so the background thread can notify
+                // webviews. Without this, the settings window's recordings
+                // list stays frozen at whatever was on disk when its
+                // WebView2 first loaded, since batch mode never round-trips
+                // through the renderer's voice_buffer_save path.
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    match crate::voice_buffer::save_recording_at_epoch(
+                        &dir,
+                        &samples,
+                        safe_sample_rate,
+                        safe_channels,
+                        &transcript_clone,
+                        Some(max_size),
+                        history_epoch,
+                    ) {
+                        Ok(_) => {
+                            let _ = app_handle.emit("voice-buffer-updated", ());
                         }
-                    });
-                }
+                        Err(e) => warn!("[voice_buffer] Auto-save failed: {e}"),
+                    }
+                });
             }
 
             Ok(RecordingStopResponse {
@@ -573,6 +896,8 @@ pub async fn recording_stop(
                 confidence: alt["confidence"].as_f64(),
                 duration: Some(duration),
                 error: None,
+                session_id: None,
+                limit_reached: Some(limit_reached),
             })
         }
         None => Ok(RecordingStopResponse {
@@ -581,6 +906,8 @@ pub async fn recording_stop(
             confidence: None,
             duration: Some(duration),
             error: Some("Unexpected Deepgram response structure".to_string()),
+            session_id: None,
+            limit_reached: Some(limit_reached),
         }),
     }
 }
@@ -589,6 +916,8 @@ pub async fn recording_stop(
 #[tauri::command]
 pub fn recording_cancel(state: State<AppState>) -> OkResponse {
     *lock_or_recover(&state.is_recording) = false;
+    *lock_or_recover(&state.audio_stream) = None;
+    *lock_or_recover(&state.audio_level) = 0.0;
     lock_or_recover(&state.recording_buffer).clear();
     OkResponse::ok()
 }
@@ -618,10 +947,7 @@ pub fn recording_cancel(state: State<AppState>) -> OkResponse {
 /// `https://huggingface.co/ggerganov/whisper.cpp/tree/main`
 /// Recommended starter: `ggml-base.en.bin` (~142 MB, English only, fast)
 #[tauri::command]
-pub fn whisper_transcribe(
-    model_path: String,
-    state: State<AppState>,
-) -> RecordingStopResponse {
+pub fn whisper_transcribe(model_path: String, state: State<AppState>) -> RecordingStopResponse {
     *lock_or_recover(&state.is_recording) = false;
     let samples = std::mem::take(&mut *lock_or_recover(&state.recording_buffer));
     let sample_rate = *lock_or_recover(&state.audio_sample_rate);
@@ -633,6 +959,7 @@ pub fn whisper_transcribe(
             confidence: None,
             duration: None,
             error: Some("No audio was captured".to_string()),
+            ..Default::default()
         };
     }
 
@@ -655,6 +982,7 @@ pub fn whisper_transcribe(
                 "local-stt feature not enabled — rebuild with `cargo build --features local-stt`"
                     .to_string(),
             ),
+            ..Default::default()
         }
     }
 }
@@ -686,7 +1014,8 @@ fn whisper_transcribe_impl(
         };
     }
 
-    let ctx = match WhisperContext::new_with_params(model_path, WhisperContextParameters::default()) {
+    let ctx = match WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+    {
         Ok(c) => c,
         Err(e) => {
             return RecordingStopResponse {
@@ -933,7 +1262,10 @@ pub fn update_global_hotkey(
     }
 
     *lock_or_recover(&state.global_hotkey) = shortcut;
-    debug!("[hotkey] Updated global hotkey to: {}", lock_or_recover(&state.global_hotkey));
+    debug!(
+        "[hotkey] Updated global hotkey to: {}",
+        lock_or_recover(&state.global_hotkey)
+    );
     OkResponse::ok()
 }
 
@@ -995,10 +1327,7 @@ pub fn voice_buffer_get_audio(
 
 /// Deletes a single recording from the voice buffer.
 #[tauri::command]
-pub fn voice_buffer_delete(
-    filename: String,
-    state: State<AppState>,
-) -> OkResponse {
+pub fn voice_buffer_delete(filename: String, state: State<AppState>) -> OkResponse {
     let dir = lock_or_recover(&state.voice_buffer_dir).clone();
     match crate::voice_buffer::delete_recording(&dir, &filename) {
         Ok(()) => OkResponse::ok(),
@@ -1020,29 +1349,41 @@ pub fn voice_buffer_clear(state: State<AppState>) -> OkResponse {
 /// Called automatically after recording_stop if voice buffer is enabled,
 /// or manually from the frontend.
 #[tauri::command]
-pub fn voice_buffer_save(
+pub async fn voice_buffer_save(
     transcript: String,
-    state: State<AppState>,
-) -> OkResponse {
+    state: State<'_, AppState>,
+) -> Result<OkResponse, String> {
     let enabled = *lock_or_recover(&state.voice_buffer_enabled);
     if !enabled {
-        return OkResponse::err("Voice buffer is disabled");
+        return Ok(OkResponse::err("Voice buffer is disabled"));
     }
     let dir = lock_or_recover(&state.voice_buffer_dir).clone();
     if dir.as_os_str().is_empty() {
-        return OkResponse::err("Voice buffer directory not initialized");
+        return Ok(OkResponse::err("Voice buffer directory not initialized"));
     }
     let samples = lock_or_recover(&state.recording_buffer).clone();
     let sample_rate = *lock_or_recover(&state.audio_sample_rate);
     let channels = *lock_or_recover(&state.audio_channels);
     let max_size = *lock_or_recover(&state.voice_buffer_max_size);
+    let history_epoch = crate::voice_buffer::history_epoch(&dir);
 
-    match crate::voice_buffer::save_recording(
-        &dir, &samples, sample_rate, channels, &transcript, Some(max_size),
-    ) {
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::voice_buffer::save_recording_at_epoch(
+            &dir,
+            &samples,
+            sample_rate,
+            channels,
+            &transcript,
+            Some(max_size),
+            history_epoch,
+        )
+    })
+    .await
+    .map_err(|e| format!("Voice buffer worker failed: {e}"))?;
+    Ok(match result {
         Ok(_filename) => OkResponse::ok(),
         Err(e) => OkResponse::err(e),
-    }
+    })
 }
 
 /// Updates the transcript for a recording in the voice buffer.
@@ -1068,6 +1409,7 @@ pub fn voice_buffer_update_transcript(
 pub async fn voice_buffer_reprocess(
     filename: String,
     api_key: String,
+    auth_scheme: Option<crate::deepgram_ws::AuthScheme>,
     state: State<'_, AppState>,
 ) -> Result<RecordingStopResponse, String> {
     let dir = lock_or_recover(&state.voice_buffer_dir).clone();
@@ -1094,21 +1436,28 @@ pub async fn voice_buffer_reprocess(
         let channels = u16::from_le_bytes(channels_bytes).max(1);
         let sample_rate = u32::from_le_bytes(rate_bytes).max(1);
         let samples: Vec<i16> = raw_bytes[44..]
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| i16::from_le_bytes(*chunk))
             .collect();
         (samples, sample_rate, channels)
     };
 
     if samples_i16.is_empty() {
         return Ok(RecordingStopResponse {
-            success: false, transcript: None, confidence: None,
-            duration: None, error: Some("No audio in recording".to_string()),
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: None,
+            error: Some("No audio in recording".to_string()),
+            ..Default::default()
         });
     }
 
     // Convert i16 → f32 for WAV encoding
-    let samples_f32: Vec<f32> = samples_i16.iter()
+    let samples_f32: Vec<f32> = samples_i16
+        .iter()
         .map(|&s| s as f32 / i16::MAX as f32)
         .collect();
     let duration = samples_f32.len() as f64 / (sample_rate as f64 * source_channels as f64);
@@ -1129,10 +1478,14 @@ pub async fn voice_buffer_reprocess(
         url.push_str(&format!("&keyterm={}", urlencoding::encode(kw)));
     }
 
-    let client = reqwest::Client::new();
-    let resp = match client
+    let request_started = Instant::now();
+    let resp = match state
+        .http_client
         .post(&url)
-        .header("Authorization", format!("Token {api_key}"))
+        .header(
+            "Authorization",
+            auth_scheme.unwrap_or_default().authorization(&api_key),
+        )
         .header("Content-Type", "audio/wav")
         .body(wav)
         .send()
@@ -1141,19 +1494,31 @@ pub async fn voice_buffer_reprocess(
         Ok(r) => r,
         Err(e) => {
             return Ok(RecordingStopResponse {
-                success: false, transcript: None, confidence: None,
-                duration: Some(duration), error: Some(format!("Deepgram request failed: {e}")),
+                success: false,
+                transcript: None,
+                confidence: None,
+                duration: Some(duration),
+                error: Some(format!("Deepgram request failed: {e}")),
+                ..Default::default()
             })
         }
     };
 
     let status = resp.status();
+    debug!(
+        "[reprocess] Deepgram request completed: status={}, elapsed_ms={}",
+        status,
+        request_started.elapsed().as_millis(),
+    );
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        warn!("[reprocess] Deepgram returned {}: {}", status, &text[..text.len().min(200)]);
+        warn!("[reprocess] Deepgram returned status {}", status);
         return Ok(RecordingStopResponse {
-            success: false, transcript: None, confidence: None,
-            duration: Some(duration), error: Some(format!("Deepgram error ({})", status)),
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: Some(duration),
+            error: Some(format!("Deepgram error ({})", status)),
+            ..Default::default()
         });
     }
 
@@ -1161,13 +1526,18 @@ pub async fn voice_buffer_reprocess(
         Ok(j) => j,
         Err(e) => {
             return Ok(RecordingStopResponse {
-                success: false, transcript: None, confidence: None,
-                duration: Some(duration), error: Some(format!("Invalid Deepgram response: {e}")),
+                success: false,
+                transcript: None,
+                confidence: None,
+                duration: Some(duration),
+                error: Some(format!("Invalid Deepgram response: {e}")),
+                ..Default::default()
             });
         }
     };
 
-    let alt = json.get("results")
+    let alt = json
+        .get("results")
         .and_then(|r| r.get("channels"))
         .and_then(|ch| ch.get(0))
         .and_then(|c| c.get("alternatives"))
@@ -1180,10 +1550,15 @@ pub async fn voice_buffer_reprocess(
             confidence: alt["confidence"].as_f64(),
             duration: Some(duration),
             error: None,
+            ..Default::default()
         }),
         None => Ok(RecordingStopResponse {
-            success: false, transcript: None, confidence: None,
-            duration: Some(duration), error: Some("Unexpected Deepgram response structure".to_string()),
+            success: false,
+            transcript: None,
+            confidence: None,
+            duration: Some(duration),
+            error: Some("Unexpected Deepgram response structure".to_string()),
+            ..Default::default()
         }),
     }
 }
@@ -1222,7 +1597,10 @@ mod tests {
     #[test]
     fn ok_response_serialises_no_error_field_when_none() {
         let json = serde_json::to_string(&OkResponse::ok()).unwrap();
-        assert!(!json.contains("error"), "error field should be omitted: {json}");
+        assert!(
+            !json.contains("error"),
+            "error field should be omitted: {json}"
+        );
         assert!(json.contains("\"success\":true"));
     }
 
@@ -1255,6 +1633,7 @@ mod tests {
             confidence: None,
             duration: None,
             error: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&r).unwrap();
         assert_eq!(json, r#"{"success":true}"#, "{json}");
@@ -1268,6 +1647,7 @@ mod tests {
             confidence: Some(0.99),
             duration: Some(3.2),
             error: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"transcript\":\"hello world\""), "{json}");
@@ -1279,7 +1659,10 @@ mod tests {
     fn settings_broadcast_parses_keywords() {
         let state = AppState::default();
         let mut map = HashMap::new();
-        map.insert("deepgram_keywords".to_string(), "MacroVox\nDeepgram\n".to_string());
+        map.insert(
+            "deepgram_keywords".to_string(),
+            "MacroVox\nDeepgram\n".to_string(),
+        );
         if let Some(raw) = map.get("deepgram_keywords") {
             let keywords: Vec<String> = raw
                 .split('\n')
@@ -1307,7 +1690,10 @@ mod tests {
     fn audio_set_device_updates_state() {
         let state = AppState::default();
         *lock_or_recover(&state.selected_mic_device) = Some("Headset".to_string());
-        assert_eq!(lock_or_recover(&state.selected_mic_device).as_deref(), Some("Headset"));
+        assert_eq!(
+            lock_or_recover(&state.selected_mic_device).as_deref(),
+            Some("Headset")
+        );
     }
 
     #[test]
@@ -1375,8 +1761,10 @@ mod tests {
         let state = AppState::default();
         for raw in ["1", "yes", "TRUE", "True", "", "garbage"] {
             *lock_or_recover(&state.voice_buffer_enabled) = raw == "true";
-            assert!(!*lock_or_recover(&state.voice_buffer_enabled),
-                "expected disabled for value {raw:?}");
+            assert!(
+                !*lock_or_recover(&state.voice_buffer_enabled),
+                "expected disabled for value {raw:?}"
+            );
         }
     }
 
@@ -1409,8 +1797,11 @@ mod tests {
                     *lock_or_recover(&state.voice_buffer_max_size) = size;
                 }
             }
-            assert_eq!(*lock_or_recover(&state.voice_buffer_max_size), initial,
-                "unparseable {bad:?} must leave max_size unchanged");
+            assert_eq!(
+                *lock_or_recover(&state.voice_buffer_max_size),
+                initial,
+                "unparseable {bad:?} must leave max_size unchanged"
+            );
         }
     }
 

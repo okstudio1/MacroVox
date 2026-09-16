@@ -1,6 +1,6 @@
 [package]
 name = "macrovox"
-version = "1.0.8"
+version = "1.0.9"
 edition = "2021"
 description = "MacroVox — Real-time voice dictation with AI cleanup"
 authors = ["OK Studio"]
@@ -36,7 +36,7 @@ urlencoding = "2"
 # Phase 4: Deepgram WebSocket streaming (pre-warmed real-time STT)
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
-tokio = { version = "1", features = ["sync", "macros", "rt"] }
+tokio = { version = "1", features = ["sync", "macros", "rt", "time", "io-util", "net"] }
 
 # Phase 4: local STT option (off by default — requires cmake + model download)
 # Enable with: cargo build --features local-stt

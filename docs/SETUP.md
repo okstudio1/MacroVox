@@ -2,7 +2,7 @@
 
 Step-by-step instructions for setting up MacroVox's backend infrastructure from scratch. MacroVox uses **Supabase** for authentication and database, **Netlify** for hosting serverless functions, and **Stripe** for subscription billing.
 
-> **MacroVox is a managed service** — Deepgram (speech-to-text) and Claude (AI post-processing) are both required and provisioned server-side for Pro subscribers. Users never configure API keys.
+> **Managed Pro and Team traffic keeps provider master keys server-side.** BYOK users may configure their own keys locally, but no shared managed key is stored in the client or a user-readable database row.
 
 ---
 
@@ -33,6 +33,11 @@ VITE_SUPABASE_KEY=YOUR_PUBLISHABLE_KEY
 
 The Supabase client is initialized in `src/renderer/lib/supabase.ts` using `import.meta.env.VITE_SUPABASE_URL` and `VITE_SUPABASE_KEY`. Session tokens are persisted in `localStorage` by the Supabase JS SDK automatically.
 
+The desktop CSP in `src-tauri/tauri.conf.json` contains the exact hosted
+Supabase origin. A custom deployment must replace that origin with its exact
+`https://YOUR_PROJECT.supabase.co` value, then run `npm run check:csp`. Do not
+use a wildcard CSP source.
+
 ---
 
 ## Step 2: Enable Auth Providers
@@ -48,14 +53,14 @@ In the Supabase dashboard, go to **Authentication > Providers**:
 2. Create an OAuth 2.0 Client ID (type: Web application)
 3. Set **Authorized redirect URI** to: `https://YOUR_PROJECT.supabase.co/auth/v1/callback`
 4. Copy the Client ID and Client Secret
-5. In Supabase dashboard: **Authentication > Providers > Google** — paste credentials
+5. In Supabase dashboard: **Authentication > Providers > Google**, then paste credentials
 
 ### Facebook OAuth
 1. Go to [Facebook Developers](https://developers.facebook.com/apps)
 2. Create an app, add **Facebook Login** product
 3. Set **Valid OAuth Redirect URI** to: `https://YOUR_PROJECT.supabase.co/auth/v1/callback`
 4. Copy the App ID and App Secret
-5. In Supabase dashboard: **Authentication > Providers > Facebook** — paste credentials
+5. In Supabase dashboard: **Authentication > Providers > Facebook**, then paste credentials
 
 ### Register custom protocol
 
@@ -63,55 +68,23 @@ For OAuth to work in the Tauri app, the redirect must use the `macrovox://` cust
 
 ---
 
-## Step 3: Create Database Tables
+## Step 3: Apply Database Migrations
 
-In the Supabase **SQL Editor**, run:
+Do not create billing tables or policies manually. The versioned migrations in
+`supabase/migrations` define the tables, RLS policies, grants, atomic quota
+reservation, checkout reservation, and webhook event ledger.
 
-```sql
--- Subscriptions table
-CREATE TABLE subscriptions (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL UNIQUE,
-  status TEXT NOT NULL DEFAULT 'free' CHECK (status IN ('free', 'pro', 'team')),
-  stripe_customer_id TEXT,
-  stripe_subscription_id TEXT,
-  expires_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  updated_at TIMESTAMPTZ DEFAULT now()
-);
-
--- Managed API keys for Pro users
-CREATE TABLE managed_api_keys (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL UNIQUE,
-  deepgram_key TEXT,
-  anthropic_key TEXT,
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-
--- API usage tracking for rate limiting (populated by Netlify proxy functions)
-CREATE TABLE api_usage (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
-  service TEXT NOT NULL,       -- 'claude' or 'deepgram'
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-CREATE INDEX idx_api_usage_user_service_time ON api_usage (user_id, service, created_at);
-
--- Row Level Security (RLS) — users can only read their own data
--- Note: Automatic RLS should be enabled in Settings > API for future tables
-ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE managed_api_keys ENABLE ROW LEVEL SECURITY;
-ALTER TABLE api_usage ENABLE ROW LEVEL SECURITY;
--- api_usage is written/read only by the service role key (Netlify functions);
--- no user-facing RLS policy needed.
-
-CREATE POLICY "Users read own subscription" ON subscriptions
-  FOR SELECT USING (auth.uid() = user_id);
-
-CREATE POLICY "Users read own keys" ON managed_api_keys
-  FOR SELECT USING (auth.uid() = user_id);
+```powershell
+supabase db push
 ```
+
+Fresh projects do not create `managed_api_keys`. The upgrade migration clears
+any legacy provider credentials and revokes client access to the old table.
+Provider master keys must remain in Netlify environment variables only.
+
+The service role is the only caller allowed to execute quota, checkout, and
+webhook mutation functions. Authenticated clients can read only their own
+subscription summary.
 
 ---
 
@@ -119,8 +92,8 @@ CREATE POLICY "Users read own keys" ON managed_api_keys
 
 1. Go to [Stripe Dashboard](https://dashboard.stripe.com) → **Products**
 2. Click **+ Add product**
-3. Create **MacroVox** — `\$6.99/month` recurring
-   - **Description**: `Customizable voice-to-text with AI post-processing you control. Define custom AI prompts to transform your speech into any format — meeting notes, code comments, emails, or polished prose. Tailor hotkeys, recording modes, and processing rules to fit your exact workflow.`
+3. Create **MacroVox** at `\$6.99/month` recurring
+   - **Description**: `Customizable voice-to-text with AI post-processing you control. Define custom AI prompts to transform your speech into any format, including meeting notes, code comments, emails, or polished prose. Tailor hotkeys, recording modes, and processing rules to fit your exact workflow.`
 4. Save the **Price ID** (starts with `price_`)
 5. Optionally create additional tiers
 
@@ -128,8 +101,8 @@ CREATE POLICY "Users read own keys" ON managed_api_keys
 
 ## Step 5: Deploy Netlify Functions
 
-The Netlify functions handle the Claude AI proxy and Deepgram proxy for Pro subscribers.
-Billing (Stripe checkout, billing portal, webhook) runs as Supabase Edge Functions — see Step 5b.
+The Netlify functions handle the Claude proxy and short-lived Deepgram grants for subscribers.
+Billing (Stripe checkout, billing portal, webhook) runs as Supabase Edge Functions. See Step 5b.
 
 ### 5a. Create a Netlify site
 
@@ -156,12 +129,14 @@ supabase link --project-ref YOUR_PROJECT_REF
 # Set secrets (these become Deno.env in the functions)
 supabase secrets set STRIPE_SECRET_KEY=sk_live_...
 supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_...
-supabase secrets set STRIPE_PRICE_ID=price_...
-supabase secrets set DEEPGRAM_MANAGED_KEY=dg_...
-supabase secrets set ANTHROPIC_MANAGED_KEY=sk-ant-...
+supabase secrets set STRIPE_PRO_PRICE_ID=price_...
+# Set STRIPE_TEAM_PRICE_ID only when the Team product is ready.
+supabase secrets set STRIPE_TEAM_PRICE_ID=price_...
 supabase secrets set SITE_URL=https://macrovox.tech
 
-# Deploy all three billing functions
+# Apply migrations before deploying the billing functions.
+supabase db push
+
 supabase functions deploy create-checkout
 supabase functions deploy billing-portal
 supabase functions deploy stripe-webhook
@@ -183,8 +158,9 @@ In Netlify dashboard: **Site settings > Environment variables**:
 
 ```
 SUPABASE_SERVICE_ROLE_KEY=eyJ...  (from Supabase Settings > API > service_role)
-ANTHROPIC_MANAGED_KEY=sk-ant-... (required — Claude key for all subscribers)
-DEEPGRAM_MANAGED_KEY=dg_...      (optional — for future server-side transcription proxy)
+ANTHROPIC_MANAGED_KEY=sk-ant-... (required for subscriber Claude requests)
+DEEPGRAM_MANAGED_KEY=dg_...      (required for short-lived Deepgram grants)
+DEEPGRAM_TOKEN_RATE_LIMIT=120    (optional hourly issuance limit per subscriber)
 ```
 
 > **Note**: Stripe keys are only needed in the Supabase Edge Functions, not in Netlify.
@@ -205,11 +181,11 @@ export const SITE_URL = 'https://YOUR-SITE.netlify.app'
 python run.py
 ```
 
-1. **Settings > Sign Up** — create account with email or Google/Facebook
-2. **Settings > Subscription** — should show "Free Plan"
-3. **Upgrade to Pro** — completes Stripe checkout, keys are provisioned
-4. **Dictation** — recording should work with managed Deepgram key
-5. **Ctrl+Space** — global hotkey should toggle recording
+1. **Settings > Sign Up**: create an account with email or Google/Facebook
+2. **Settings > Subscription**: should show "Free Plan"
+3. **Upgrade to Pro**: completes Stripe checkout and updates entitlement
+4. **Dictation**: each managed request should mint a short-lived Deepgram grant
+5. **Ctrl+Space**: global hotkey should toggle recording
 
 ---
 
@@ -227,7 +203,7 @@ python run.py
 ┌───────────▼──────────────┐  ┌────────▼────────────────┐
 │   Supabase (hosted)       │  │   Netlify Functions      │
 │  Auth: email, Google, FB  │  │  claude-proxy            │
-│  DB: subscriptions, keys  │  │  deepgram-proxy          │
+│  DB: subscriptions, usage │  │  claude + token proxies  │
 │                           │  └─────────────────────────┘
 │  Edge Functions (Deno):   │
 │  create-checkout (Stripe) │

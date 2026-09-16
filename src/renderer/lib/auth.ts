@@ -14,7 +14,7 @@
  * scheduled for a future phase.  Email auth is fully functional.
  */
 
-import type { User } from '@supabase/supabase-js'
+import type { AuthChangeEvent, User } from '@supabase/supabase-js'
 import { open } from '@tauri-apps/plugin-shell'
 import { supabase } from './supabase'
 
@@ -61,6 +61,16 @@ export interface ManagedKeysResult {
   anthropicKey?: string | null
   hasManagedKeys?: boolean
   error?: string
+}
+
+export interface DeepgramCredential {
+  apiKey: string
+  authScheme: 'token' | 'bearer'
+  expiresIn?: number
+}
+
+export interface DeepgramCredentialResult extends OkResult {
+  credential?: DeepgramCredential
 }
 
 // ── Dev mode ─────────────────────────────────────────────────────────────────
@@ -136,6 +146,14 @@ export async function signOut(): Promise<OkResult> {
   return { success: true }
 }
 
+/** Subscribes to Supabase auth transitions in the current webview. */
+export function onAuthStateChange(callback: (user: AppUser | null, event: AuthChangeEvent) => void): () => void {
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    callback(session?.user ? mapUser(session.user) : null, event)
+  })
+  return () => subscription.unsubscribe()
+}
+
 /**
  * Opens the OAuth provider in the system browser via `@tauri-apps/plugin-shell`.
  * The session callback (deep-link `macrovox://auth/callback`) is not yet wired;
@@ -188,43 +206,27 @@ export async function getSubscription(): Promise<GetSubscriptionResult> {
 }
 
 /**
- * Fetches managed API keys (Deepgram, Anthropic) from the Supabase
- * `managed_api_keys` table.  Only provisioned for Pro/Team subscribers.
- *
- * The Anthropic key is intentionally never returned to the renderer — Claude
- * calls go through the Netlify claude-proxy which holds the key server-side.
- * Only the Deepgram key is exposed (the Rust backend uses it directly for
- * low-latency streaming; routing it through the proxy is a planned change).
+ * Reports whether the current subscription includes managed transcription.
+ * Provider credentials stay on the server and are never returned here.
  */
 export async function getManagedKeys(): Promise<ManagedKeysResult> {
-  if (DEV_MODE) {
+  if (DEV_MODE && import.meta.env.VITE_DEEPGRAM_KEY) {
     // Dev-only: let the renderer bypass Supabase sign-in with the keys pulled
     // from `.env`. `import.meta.env.DEV` is false in production builds, so
     // Vite dead-code-eliminates this branch — the keys are NOT bundled into
     // release artifacts. Still, treat the VITE_* values as compromised and
     // rotate before any real deploy (see SECURITY_AUDIT C2).
-    const dk = import.meta.env.VITE_DEEPGRAM_KEY || null
-    const ak = import.meta.env.VITE_ANTHROPIC_KEY || null
-    return { success: true, deepgramKey: dk, anthropicKey: ak, hasManagedKeys: !!(dk || ak) }
+    return { success: true, deepgramKey: null, anthropicKey: null, hasManagedKeys: true }
   }
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session?.user) return { success: false, hasManagedKeys: false }
-
-  const { data, error } = await supabase
-    .from('managed_api_keys')
-    .select('deepgram_key')
-    .eq('user_id', session.user.id)
-    .single()
-
-  if (error || !data) {
-    return { success: true, hasManagedKeys: false, deepgramKey: null, anthropicKey: null }
-  }
+  const result = await getSubscription()
+  const entitled = result.success && !!result.subscription?.features.managedApiKeys
 
   return {
-    success: true,
-    deepgramKey: data.deepgram_key || null,
-    anthropicKey: null, // Claude is proxy-only — renderer never sees the key.
-    hasManagedKeys: !!data.deepgram_key,
+    success: result.success,
+    deepgramKey: null,
+    anthropicKey: null, // Claude is proxy-only; the renderer never sees the key.
+    hasManagedKeys: entitled,
+    error: result.error,
   }
 }
 

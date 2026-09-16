@@ -51,12 +51,21 @@ export interface RecordingStopResult {
   transcript?: string
   confidence?: number
   duration?: number
+  sessionId?: number
+  limitReached?: boolean
   error?: string
 }
 
 export interface TranscriptEvent {
   transcript: string
   isFinal: boolean
+  sessionId: number
+}
+
+export type DeepgramAuthScheme = 'token' | 'bearer'
+
+export interface DeepgramStartResult extends OkResult {
+  sessionId?: number
 }
 
 // ── Event helpers ─────────────────────────────────────────────────────────────
@@ -108,18 +117,20 @@ export const getAudioLevel = (): Promise<number> =>
 
 // ── Deepgram streaming ────────────────────────────────────────────────────────
 
-export const startDeepgram = (apiKey: string): Promise<OkResult> =>
-  invoke('deepgram_start', { apiKey })
+export const startDeepgram = (
+  apiKey: string,
+  authScheme: DeepgramAuthScheme = 'token',
+): Promise<DeepgramStartResult> => invoke('deepgram_start', { apiKey, authScheme })
 
-export const stopDeepgram = (): Promise<OkResult> =>
-  invoke('deepgram_stop')
+export const stopDeepgram = (sessionId?: number): Promise<RecordingStopResult> =>
+  invoke('deepgram_stop', { sessionId })
 
 export const onTranscript = (
   callback: (data: TranscriptEvent) => void,
 ): () => void => makeListener('deepgram:transcript', callback)
 
 export const onStreamingError = (
-  callback: (data: { error: string }) => void,
+  callback: (data: { error: string; sessionId: number }) => void,
 ): () => void => makeListener('deepgram:error', callback)
 
 // ── Buffered recording ────────────────────────────────────────────────────────
@@ -127,8 +138,10 @@ export const onStreamingError = (
 export const startRecording = (): Promise<OkResult> =>
   invoke('recording_start')
 
-export const stopRecording = (apiKey: string): Promise<RecordingStopResult> =>
-  invoke('recording_stop', { apiKey })
+export const stopRecording = (
+  apiKey: string,
+  authScheme: DeepgramAuthScheme = 'token',
+): Promise<RecordingStopResult> => invoke('recording_stop', { apiKey, authScheme })
 
 export const cancelRecording = (): Promise<OkResult> =>
   invoke('recording_cancel')
@@ -245,8 +258,11 @@ export const voiceBufferSave = (transcript: string): Promise<OkResult> =>
 export const voiceBufferUpdateTranscript = (filename: string, transcript: string): Promise<OkResult> =>
   invoke('voice_buffer_update_transcript', { filename, transcript })
 
-export const voiceBufferReprocess = (filename: string, apiKey: string): Promise<RecordingStopResult> =>
-  invoke('voice_buffer_reprocess', { filename, apiKey })
+export const voiceBufferReprocess = (
+  filename: string,
+  apiKey: string,
+  authScheme: DeepgramAuthScheme = 'token',
+): Promise<RecordingStopResult> => invoke('voice_buffer_reprocess', { filename, apiKey, authScheme })
 
 export const voiceBufferOpenFolder = (): Promise<OkResult> =>
   invoke('voice_buffer_open_folder')
@@ -258,6 +274,11 @@ export const onQuickDictationStart = (callback: () => void): () => void =>
 
 export const onQuickDictationToggle = (callback: () => void): () => void =>
   makeListener('quick-dictation-toggle', callback)
+
+export const emitAuthStateChanged = (): Promise<void> => emit('auth-state-changed')
+
+export const onAuthStateChanged = (callback: () => void): (() => void) =>
+  makeListener<unknown>('auth-state-changed', () => callback())
 
 export const onThemeChange = (
   callback: (themeId: string) => void,

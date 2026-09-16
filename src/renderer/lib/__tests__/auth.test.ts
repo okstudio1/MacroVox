@@ -33,6 +33,7 @@ const { mockSupabase, mockOpen } = vi.hoisted(() => {
   const mockSignOut = vi.fn()
   const mockSignInWithOAuth = vi.fn()
   const mockResetPasswordForEmail = vi.fn()
+  const mockOnAuthStateChange = vi.fn()
   const mockFrom = vi.fn()
   const mockFunctionsInvoke = vi.fn()
 
@@ -46,6 +47,7 @@ const { mockSupabase, mockOpen } = vi.hoisted(() => {
         signOut: mockSignOut,
         signInWithOAuth: mockSignInWithOAuth,
         resetPasswordForEmail: mockResetPasswordForEmail,
+        onAuthStateChange: mockOnAuthStateChange,
       },
       from: mockFrom,
       functions: { invoke: mockFunctionsInvoke },
@@ -86,6 +88,9 @@ function singleResolves(data: unknown, error: unknown = null) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockSupabase.auth.onAuthStateChange.mockReturnValue({
+    data: { subscription: { unsubscribe: vi.fn() } },
+  })
   // Force production-mode branches by default; per-test overrides toggle DEV.
   vi.stubEnv('VITE_DEV_MODE', 'false')
 })
@@ -280,27 +285,27 @@ describe('getSubscription', () => {
 // ── getManagedKeys ───────────────────────────────────────────────────────────
 
 describe('getManagedKeys', () => {
-  it('NEVER returns an anthropic key to the renderer in production', async () => {
-    // Hard-coded boundary: Claude calls go through the proxy. Even if the
-    // Supabase row had an anthropic_key column, we don't read it.
+  it('reports managed entitlement without reading or returning provider keys', async () => {
     setSession(fakeSupabaseUser())
     mockSupabase.from.mockReturnValue(
-      singleResolves({ deepgram_key: 'dg-real-key' }),
+      singleResolves({ status: 'pro', expires_at: null }),
     )
     const r = await auth.getManagedKeys()
-    expect(r.deepgramKey).toBe('dg-real-key')
+    expect(r.deepgramKey).toBeNull()
     expect(r.anthropicKey).toBeNull()
     expect(r.hasManagedKeys).toBe(true)
+    expect(mockSupabase.from).toHaveBeenCalledWith('subscriptions')
+    expect(mockSupabase.from).not.toHaveBeenCalledWith('managed_api_keys')
   })
 
   it('returns hasManagedKeys=false when there is no session', async () => {
     setSession(null)
     const r = await auth.getManagedKeys()
     expect(r.hasManagedKeys).toBe(false)
-    expect(r.deepgramKey).toBeUndefined()
+    expect(r.deepgramKey).toBeNull()
   })
 
-  it('returns hasManagedKeys=false when the user has no managed-keys row', async () => {
+  it('returns hasManagedKeys=false for a free account', async () => {
     setSession(fakeSupabaseUser())
     mockSupabase.from.mockReturnValue(singleResolves(null, { code: 'PGRST116' }))
     const r = await auth.getManagedKeys()
@@ -309,12 +314,24 @@ describe('getManagedKeys', () => {
     expect(r.anthropicKey).toBeNull()
   })
 
-  it('returns hasManagedKeys=false when the deepgram_key column is empty', async () => {
-    setSession(fakeSupabaseUser())
-    mockSupabase.from.mockReturnValue(singleResolves({ deepgram_key: '' }))
-    const r = await auth.getManagedKeys()
-    expect(r.hasManagedKeys).toBe(false)
-    expect(r.deepgramKey).toBeNull()
+})
+
+describe('onAuthStateChange', () => {
+  it('forwards the event kind and mapped user to lifecycle consumers', () => {
+    let listener: ((event: string, session: { user: object } | null) => void) | undefined
+    const unsubscribe = vi.fn()
+    mockSupabase.auth.onAuthStateChange.mockImplementation((callback: (event: string, session: { user: object } | null) => void) => {
+      listener = callback
+      return { data: { subscription: { unsubscribe } } }
+    })
+    const callback = vi.fn()
+    const cleanup = auth.onAuthStateChange(callback)
+
+    listener?.('TOKEN_REFRESHED', { user: fakeSupabaseUser() })
+
+    expect(callback).toHaveBeenCalledWith(expect.objectContaining({ id: 'user-1' }), 'TOKEN_REFRESHED')
+    cleanup()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
   })
 })
 

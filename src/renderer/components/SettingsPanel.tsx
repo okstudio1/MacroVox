@@ -123,7 +123,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
     localStorage.getItem('voice_buffer_max_size') || String(100 * 1024 * 1024)
   )
   const [voiceBufferInfo, setVoiceBufferInfo] = useState<ipc.VoiceBufferInfo | null>(null)
-  const [deepgramKey, setDeepgramKey] = useState<string | null>(null)
+  const [voiceBufferError, setVoiceBufferError] = useState<string | null>(null)
 
   // Bring-your-own API keys. Persisted to localStorage and broadcast so the
   // dictation window picks them up live (see ALLOWED_SETTINGS_KEYS in tauri-ipc).
@@ -156,13 +156,24 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
     ipc.getPlatformInfo().then(setPlatformInfo).catch(() => {})
   }, [])
 
-  useEffect(() => {
-    if (user) {
-      auth.getManagedKeys().then(result => {
-        if (result.success && result.deepgramKey) setDeepgramKey(result.deepgramKey)
-      }).catch(() => {})
+  const handleClearVoiceHistory = async () => {
+    setVoiceBufferError(null)
+    try {
+      const result = await ipc.voiceBufferClear()
+      if (!result.success) {
+        setVoiceBufferError(result.error || 'Some recordings could not be deleted')
+      }
+    } catch {
+      setVoiceBufferError('Could not delete the recordings')
+    } finally {
+      try {
+        setVoiceBufferInfo(await ipc.voiceBufferInfo())
+      } catch {
+        setVoiceBufferError(current => current || 'Could not refresh recording storage')
+      }
+      await ipc.emitVoiceBufferUpdated().catch(() => {})
     }
-  }, [user])
+  }
 
   const handleEmailAuth = async () => {
     if (!authEmail || !authPassword) return
@@ -619,6 +630,11 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
               Quick Dictation
             </h3>
             <div className="space-y-3">
+              {voiceBufferError && (
+                <p role="alert" className="text-xs" style={{ color: 'var(--danger, #ef4444)' }}>
+                  {voiceBufferError}
+                </p>
+              )}
               {[
                 { label: 'Auto-copy on stop', desc: 'Instantly copy transcript to clipboard when you stop recording', value: autoCopyOnStop, onChange: handleAutoCopyToggle, disabled: false },
                 {
@@ -665,6 +681,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                   <option value="30">30 sec</option>
                   <option value="45">45 sec</option>
                   <option value="60">60 sec</option>
+                  <option value="off">Off</option>
                 </select>
               </div>
             </div>
@@ -1057,11 +1074,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                         </button>
                         {voiceBufferInfo.recording_count > 0 && (
                           <button
-                            onClick={async () => {
-                              await ipc.voiceBufferClear()
-                              const info = await ipc.voiceBufferInfo()
-                              setVoiceBufferInfo(info)
-                            }}
+                            onClick={handleClearVoiceHistory}
                             className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-red-900/40 transition-colors"
                             style={{ color: '#f87171' }}
                           >
@@ -1072,9 +1085,19 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                     </div>
                   )}
 
-                  <VoiceHistory user={user ? { id: user.id } : null} apiKey={deepgramKey} />
                 </>
               )}
+              {!voiceBufferEnabled && !!voiceBufferInfo?.recording_count && (
+                <button
+                  type="button"
+                  onClick={handleClearVoiceHistory}
+                  className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-red-900/40 transition-colors"
+                  style={{ color: '#f87171' }}
+                >
+                  <Trash2 size={12} /> Delete retained recordings
+                </button>
+              )}
+              <VoiceHistory user={user ? { id: user.id } : null} />
             </div>
           </section>
           )}

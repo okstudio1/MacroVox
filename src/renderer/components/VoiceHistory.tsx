@@ -29,6 +29,7 @@ export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
   const [copiedFile, setCopiedFile] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: string } | null>(null)
   const [sortNewestFirst, setSortNewestFirst] = useState(true)
+  const [actionError, setActionError] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -100,15 +101,24 @@ export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
   }
 
   const handleDelete = async (file: string) => {
+    setActionError(null)
+    setContextMenu(null)
     if (playingFile === file) {
       audioRef.current?.pause()
       audioRef.current = null
       setPlayingFile(null)
     }
-    await ipc.voiceBufferDelete(file)
-    setRecordings(prev => prev.filter(r => r.file !== file))
-    setContextMenu(null)
-    if (expandedFile === file) setExpandedFile(null)
+    try {
+      const result = await ipc.voiceBufferDelete(file)
+      if (!result.success) {
+        setActionError(result.error || 'Could not delete the recording')
+        return
+      }
+      setRecordings(prev => prev.filter(r => r.file !== file))
+      if (expandedFile === file) setExpandedFile(null)
+    } catch {
+      setActionError('Could not delete the recording')
+    }
   }
 
   const handleReprocess = async (file: string) => {
@@ -148,10 +158,19 @@ export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
   const handleCopyTranscript = async (file: string) => {
     const rec = recordings.find(r => r.file === file)
     if (!rec?.transcript) return
-    await ipc.copyToClipboard(rec.transcript)
-    setCopiedFile(file)
-    setTimeout(() => setCopiedFile(null), 2000)
+    setActionError(null)
     setContextMenu(null)
+    try {
+      const result = await ipc.copyToClipboard(rec.transcript)
+      if (!result.success) {
+        setActionError(result.error || 'Could not copy the transcript')
+        return
+      }
+      setCopiedFile(file)
+      setTimeout(() => setCopiedFile(null), 2000)
+    } catch {
+      setActionError('Could not copy the transcript')
+    }
   }
 
   const handleContextMenu = (e: React.MouseEvent, file: string) => {
@@ -210,6 +229,11 @@ export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
 
   return (
     <>
+      {actionError && (
+        <p role="alert" className="mb-2 text-xs" style={{ color: 'var(--danger, #ef4444)' }}>
+          {actionError}
+        </p>
+      )}
       {/* Sort toggle */}
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
@@ -294,7 +318,7 @@ export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
                     {copiedFile === rec.file ? <Check size={10} /> : <Copy size={10} />}
                     {copiedFile === rec.file ? 'Copied' : 'Copy'}
                   </button>
-                  {user && (
+                  {user && apiKey && (
                     <button
                       onClick={() => handleReprocess(rec.file)}
                       disabled={reprocessingFile === rec.file}
@@ -339,7 +363,7 @@ export function VoiceHistory({ user, apiKey }: VoiceHistoryProps) {
           >
             <Copy size={12} /> Copy transcript
           </button>
-          {user && (
+          {user && apiKey && (
             <button
               onClick={() => handleReprocess(contextMenu.file)}
               disabled={reprocessingFile === contextMenu.file}

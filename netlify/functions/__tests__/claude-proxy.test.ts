@@ -11,11 +11,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mockGetUser = vi.fn()
 const mockFrom = vi.fn()
+const mockRpc = vi.fn()
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
     auth: { getUser: mockGetUser },
     from: mockFrom,
+    rpc: mockRpc,
   }),
 }))
 
@@ -43,7 +45,7 @@ function makeEvent(overrides: Partial<{
 }> = {}) {
   return {
     httpMethod: 'POST',
-    headers: { authorization: 'Bearer test-token', 'Content-Type': 'application/json', origin: 'https://tauri.localhost' },
+    headers: { authorization: 'Bearer test-token', 'Content-Type': 'application/json', origin: 'http://tauri.localhost' },
     body: JSON.stringify({
       user_id: 'user-123',
       model: 'claude-sonnet-4-20250514',
@@ -95,6 +97,7 @@ function mockProUser() {
 describe('claude-proxy', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockRpc.mockResolvedValue({ data: true, error: null })
   })
 
   it('returns 204 for OPTIONS preflight', async () => {
@@ -262,8 +265,8 @@ describe('claude-proxy', () => {
 
     const result = await handler(makeEvent({ body }), {} as never, vi.fn())
 
-    expect(result.statusCode).toBe(400)
-    expect(JSON.parse(result.body!).error).toBe('Unknown model')
+    expect(result?.statusCode).toBe(400)
+    expect(JSON.parse(result?.body ?? '{}').error).toBe('Unknown model')
     expect(mockMessagesCreate).not.toHaveBeenCalled()
   })
 
@@ -274,5 +277,32 @@ describe('claude-proxy', () => {
     const result = await handler(makeEvent(), {} as never, vi.fn())
     expect(result?.statusCode).toBe(502)
     expect(JSON.parse(result?.body ?? '{}')).toMatchObject({ error: 'Upstream error' })
+  })
+
+  it('rejects a lookalike Windows app origin', async () => {
+    const result = await handler(makeEvent({
+      headers: {
+        authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        origin: 'http://tauri.localhost.evil.example',
+      },
+    }), {} as never, vi.fn())
+    expect(result?.statusCode).toBe(403)
+  })
+
+  it('fails closed when quota storage is unavailable', async () => {
+    mockProUser()
+    mockRpc.mockResolvedValue({ data: null, error: { message: 'database down' } })
+    const result = await handler(makeEvent(), {} as never, vi.fn())
+    expect(result?.statusCode).toBe(503)
+    expect(mockMessagesCreate).not.toHaveBeenCalled()
+  })
+
+  it('returns 429 when the atomic quota reservation is denied', async () => {
+    mockProUser()
+    mockRpc.mockResolvedValue({ data: false, error: null })
+    const result = await handler(makeEvent(), {} as never, vi.fn())
+    expect(result?.statusCode).toBe(429)
+    expect(mockMessagesCreate).not.toHaveBeenCalled()
   })
 })

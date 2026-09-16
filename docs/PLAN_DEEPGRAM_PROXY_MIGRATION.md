@@ -1,5 +1,7 @@
 # C5 Follow-up: Move Deepgram Auth Off the Renderer
 
+> September 15, 2026: the fix branch uses short-lived Deepgram grants. See the [migration runbook](BACKEND_SECURITY_MIGRATION_2026-09-15.md) and [fix ledger](SECURITY_ARCHITECTURE_FIXES_2026-09-15.md). A metered relay remains future work; issuance quotas do not enforce audio-minute limits. The design below is retained as historical planning.
+
 Implementation plan for the 2026-04-16 audit's § C5 follow-up. Targets
 **v1.0.8**, not v1.0.7 (the in-flight launch should not absorb a hot-path
 auth-flow change).

@@ -18,22 +18,23 @@
 //!
 //! background task:
 //!   ├── DgMessage::Pcm(bytes)  → WebSocket binary frame
-//!   ├── DgMessage::Stop        → send {"type":"CloseStream"}, exit loop
+//!   ├── DgMessage::Stop        → send {"type":"CloseStream"}, drain final results
 //!   └── WebSocket text frame   → parse JSON → emit "deepgram:transcript" event
 //!
 //! deepgram_stop()
-//!   └── drop DgSender  (→ recv() returns None → task sends CloseStream and exits)
-//!       OR send DgMessage::Stop explicitly
+//!   └── queue DgMessage::Stop after accepted PCM, then await the worker result
 //! ```
 //!
 //! ## Emitted events
 //!
-//! `"deepgram:transcript"` — payload `{ transcript: string, isFinal: boolean }`
+//! `"deepgram:transcript"` payload includes `transcript`, `isFinal`, and `sessionId`.
 //! Emitted for every non-empty result (interim and final) from Deepgram.
 
 use futures_util::{SinkExt, StreamExt};
-use tauri::Emitter;
-use tokio::sync::mpsc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tauri::{Emitter, Manager};
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -51,7 +52,106 @@ pub enum DgMessage {
     /// Raw 16-bit little-endian PCM bytes to forward to Deepgram.
     Pcm(Vec<u8>),
     /// Signal the task to send `{"type":"CloseStream"}` and exit cleanly.
-    Stop,
+    Stop {
+        completion: oneshot::Sender<StreamingStopResult>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthScheme {
+    #[default]
+    Token,
+    Bearer,
+}
+
+impl AuthScheme {
+    pub fn authorization(self, api_key: &str) -> String {
+        let prefix = match self {
+            Self::Token => "Token",
+            Self::Bearer => "Bearer",
+        };
+        format!("{prefix} {api_key}")
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StreamingStopResult {
+    pub transcript: String,
+    pub error: Option<String>,
+}
+
+fn parse_deepgram_text(text: &str) -> (Option<String>, bool, bool) {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (None, false, false);
+    };
+    if json["type"].as_str() == Some("Metadata") {
+        return (None, false, true);
+    }
+    let transcript = json["channel"]["alternatives"][0]["transcript"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    (
+        transcript,
+        json["is_final"].as_bool().unwrap_or(false),
+        false,
+    )
+}
+
+async fn drain_final_results<S, E, F>(
+    ws_rx: &mut S,
+    timeout: Duration,
+    mut transcript: String,
+    mut on_transcript: F,
+) -> StreamingStopResult
+where
+    S: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+    E: std::fmt::Display,
+    F: FnMut(&str, bool),
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let incoming = match tokio::time::timeout_at(deadline, ws_rx.next()).await {
+            Ok(incoming) => incoming,
+            Err(_) => {
+                return StreamingStopResult {
+                    transcript,
+                    error: Some("Timed out waiting for Deepgram final result".to_string()),
+                }
+            }
+        };
+        match incoming {
+            Some(Ok(Message::Text(text))) => {
+                let (fragment, is_final, is_metadata) = parse_deepgram_text(&text);
+                if let Some(fragment) = fragment {
+                    if is_final {
+                        append_final(&mut transcript, &fragment);
+                    }
+                    on_transcript(&fragment, is_final);
+                }
+                if is_metadata {
+                    return StreamingStopResult {
+                        transcript,
+                        error: None,
+                    };
+                }
+            }
+            Some(Ok(Message::Close(_))) | None => {
+                return StreamingStopResult {
+                    transcript,
+                    error: None,
+                }
+            }
+            Some(Err(error)) => {
+                return StreamingStopResult {
+                    transcript,
+                    error: Some(format!("Deepgram WebSocket failed: {error}")),
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Sender half of the channel connecting the audio callback to the WS task.
@@ -71,15 +171,30 @@ pub type DgSender = mpsc::Sender<DgMessage>;
 ///
 /// The background task emits `"deepgram:transcript"` Tauri events on the
 /// provided `AppHandle` for every non-empty result Deepgram sends back.
-pub async fn start_session(
-    api_key: &str,
-    sample_rate: u32,
-    channels: u16,
-    keywords: &[String],
-    number_format: &str,
-    language: &str,
-    app: tauri::AppHandle,
-) -> Result<DgSender, String> {
+pub struct DeepgramSessionConfig<'a> {
+    pub api_key: &'a str,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub keywords: &'a [String],
+    pub number_format: &'a str,
+    pub language: &'a str,
+    pub auth_scheme: AuthScheme,
+    pub session_id: u64,
+    pub app: tauri::AppHandle,
+}
+
+pub async fn start_session(config: DeepgramSessionConfig<'_>) -> Result<DgSender, String> {
+    let DeepgramSessionConfig {
+        api_key,
+        sample_rate,
+        channels,
+        keywords,
+        number_format,
+        language,
+        auth_scheme,
+        session_id,
+        app,
+    } = config;
     let mut url = format!(
         "wss://api.deepgram.com/v1/listen\
          ?model=nova-3\
@@ -89,7 +204,8 @@ pub async fn start_session(
          &sample_rate={sample_rate}\
          &channels={channels}\
          &interim_results=true\
-         &language={language}"
+         &language={}",
+        urlencoding::encode(language)
     );
 
     if number_format == "digits" {
@@ -109,14 +225,16 @@ pub async fn start_session(
     // returned message — a malformed key would otherwise leak into logs.
     request.headers_mut().insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Token {api_key}"))
+        HeaderValue::from_str(&auth_scheme.authorization(api_key))
             .map_err(|_| "Invalid API key format".to_string())?,
     );
 
     // Establish the WebSocket — this is the pre-warm step.
-    let (ws_stream, _response) = connect_async(request)
-        .await
-        .map_err(|e| format!("Deepgram WebSocket connect failed: {e}"))?;
+    let (ws_stream, _response) =
+        tokio::time::timeout(Duration::from_secs(15), connect_async(request))
+            .await
+            .map_err(|_| "Deepgram WebSocket connect timed out".to_string())?
+            .map_err(|e| format!("Deepgram WebSocket connect failed: {e}"))?;
 
     let (mut ws_sink, mut ws_rx) = ws_stream.split();
     // Bounded channel: 1000 messages ≈ 10 s of 10 ms audio frames.
@@ -128,26 +246,120 @@ pub async fn start_session(
     // WebSocket transcript events → Tauri events.
     tokio::spawn(async move {
         let mut graceful = false;
+        let mut completion: Option<oneshot::Sender<StreamingStopResult>> = None;
+        let mut final_transcript = String::new();
+        let mut stop_error = None;
         loop {
+            if app
+                .state::<crate::state::AppState>()
+                .active_deepgram_session_id
+                .load(Ordering::Acquire)
+                != session_id
+            {
+                stop_error = Some("Deepgram streaming session was superseded".to_string());
+                break;
+            }
             tokio::select! {
                 // ── Outbound: PCM bytes or control messages ────────────────
                 msg = rx.recv() => {
                     match msg {
                         Some(DgMessage::Pcm(bytes)) => {
-                            if ws_sink.send(Message::Binary(bytes)).await.is_err() {
-                                // WebSocket closed unexpectedly.
-                                break;
+                            match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                ws_sink.send(Message::Binary(bytes)),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    stop_error = Some(format!("Deepgram WebSocket send failed: {error}"));
+                                    break;
+                                }
+                                Err(_) => {
+                                    stop_error = Some("Timed out sending audio to Deepgram".to_string());
+                                    break;
+                                }
                             }
                         }
-                        Some(DgMessage::Stop) | None => {
+                        Some(DgMessage::Stop { completion: done }) => {
                             graceful = true;
-                            // Graceful close: tell Deepgram we are done.
-                            let _ = ws_sink
-                                .send(Message::Text(
+                            completion = Some(done);
+                            match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                ws_sink.send(Message::Text(
                                     r#"{"type":"CloseStream"}"#.to_string(),
-                                ))
-                                .await;
-                            let _ = ws_sink.close().await;
+                                )),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    stop_error = Some(format!("Failed to close Deepgram stream: {error}"));
+                                    break;
+                                }
+                                Err(_) => {
+                                    stop_error = Some("Timed out closing Deepgram stream".to_string());
+                                    break;
+                                }
+                            }
+                            let result = drain_final_results(
+                                &mut ws_rx,
+                                Duration::from_secs(8),
+                                final_transcript,
+                                |transcript, is_final| {
+                                    let _ = app.emit(
+                                        "deepgram:transcript",
+                                        serde_json::json!({
+                                            "transcript": transcript,
+                                            "isFinal": is_final,
+                                            "sessionId": session_id,
+                                        }),
+                                    );
+                                },
+                            )
+                            .await;
+                            final_transcript = result.transcript;
+                            stop_error = result.error;
+                            break;
+                        }
+                        None => {
+                            graceful = true;
+                            match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                ws_sink.send(Message::Text(
+                                    r#"{"type":"CloseStream"}"#.to_string(),
+                                )),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    stop_error = Some(format!("Failed to close Deepgram stream: {error}"));
+                                    break;
+                                }
+                                Err(_) => {
+                                    stop_error = Some("Timed out closing Deepgram stream".to_string());
+                                    break;
+                                }
+                            }
+                            let result = drain_final_results(
+                                &mut ws_rx,
+                                Duration::from_secs(8),
+                                final_transcript,
+                                |transcript, is_final| {
+                                    let _ = app.emit(
+                                        "deepgram:transcript",
+                                        serde_json::json!({
+                                            "transcript": transcript,
+                                            "isFinal": is_final,
+                                            "sessionId": session_id,
+                                        }),
+                                    );
+                                },
+                            )
+                            .await;
+                            final_transcript = result.transcript;
+                            stop_error = result.error;
                             break;
                         }
                     }
@@ -157,27 +369,47 @@ pub async fn start_session(
                 ws_msg = ws_rx.next() => {
                     match ws_msg {
                         Some(Ok(Message::Text(text))) => {
-                            emit_transcript_event(&app, &text);
+                            if emit_transcript_event(
+                                &app,
+                                &text,
+                                session_id,
+                                &mut final_transcript,
+                            ) {
+                                break;
+                            }
                         }
                         // Server close frame or stream end — exit.
                         Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(error)) => {
+                            stop_error = Some(format!("Deepgram WebSocket failed: {error}"));
+                            break;
+                        }
                         // Ping/Pong/Binary frames — ignore.
                         _ => {}
                     }
                 }
+
             }
         }
 
         if !graceful {
-            let _ = app.emit("deepgram:error", serde_json::json!({
-                "error": "Connection lost — recording may be incomplete"
-            }));
+            let _ = app.emit(
+                "deepgram:error",
+                serde_json::json!({
+                    "error": "Connection lost; recording may be incomplete",
+                    "sessionId": session_id,
+                }),
+            );
         }
 
-        // Drain any remaining messages after sending CloseStream so Deepgram
-        // can flush its buffer and emit the last final result.
-        while let Some(Ok(Message::Text(text))) = ws_rx.next().await {
-            emit_transcript_event(&app, &text);
+        let state = app.state::<crate::state::AppState>();
+        state.clear_deepgram_session_if_active(session_id);
+
+        if let Some(done) = completion {
+            let _ = done.send(StreamingStopResult {
+                transcript: final_transcript,
+                error: stop_error,
+            });
         }
     });
 
@@ -190,10 +422,30 @@ pub async fn start_session(
 ///
 /// Emits for both interim (`is_final=false`) and final (`is_final=true`) results.
 /// Skips empty transcripts (silence frames) to avoid noisy events.
-fn emit_transcript_event(app: &tauri::AppHandle, text: &str) {
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
+fn append_final(assembled: &mut String, fragment: &str) {
+    let fragment = fragment.trim();
+    if fragment.is_empty() {
         return;
+    }
+    if !assembled.is_empty() {
+        assembled.push(' ');
+    }
+    assembled.push_str(fragment);
+}
+
+fn emit_transcript_event(
+    app: &tauri::AppHandle,
+    text: &str,
+    session_id: u64,
+    final_transcript: &mut String,
+) -> bool {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
     };
+
+    if json["type"].as_str() == Some("Metadata") {
+        return true;
+    }
 
     // Deepgram wraps transcripts in results.channels[0].alternatives[0]
     let transcript = json["channel"]["alternatives"][0]["transcript"]
@@ -201,18 +453,23 @@ fn emit_transcript_event(app: &tauri::AppHandle, text: &str) {
         .unwrap_or("");
 
     if transcript.is_empty() {
-        return;
+        return false;
     }
 
     let is_final = json["is_final"].as_bool().unwrap_or(false);
+    if is_final {
+        append_final(final_transcript, transcript);
+    }
 
     let _ = app.emit(
         "deepgram:transcript",
         serde_json::json!({
             "transcript": transcript,
             "isFinal": is_final,
+            "sessionId": session_id,
         }),
     );
+    false
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -301,14 +558,108 @@ mod tests {
     fn dg_sender_send_and_recv() {
         let (tx, mut rx) = mpsc::channel::<DgMessage>(500);
         tx.try_send(DgMessage::Pcm(vec![1, 2])).unwrap();
-        tx.try_send(DgMessage::Stop).unwrap();
+        let (done, _completion) = oneshot::channel();
+        tx.try_send(DgMessage::Stop { completion: done }).unwrap();
         drop(tx);
 
         match rx.blocking_recv() {
             Some(DgMessage::Pcm(b)) => assert_eq!(b, vec![1, 2]),
             other => panic!("expected Pcm, got {other:?}"),
         }
-        assert!(matches!(rx.blocking_recv(), Some(DgMessage::Stop)));
+        assert!(matches!(rx.blocking_recv(), Some(DgMessage::Stop { .. })));
         assert!(rx.blocking_recv().is_none()); // sender dropped
+    }
+
+    #[test]
+    fn final_fragments_are_assembled_in_server_order() {
+        let mut transcript = String::new();
+        append_final(&mut transcript, "hello world");
+        append_final(&mut transcript, "from MacroVox");
+        assert_eq!(transcript, "hello world from MacroVox");
+    }
+
+    #[tokio::test]
+    async fn delayed_final_result_is_drained_before_metadata() {
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tx.send(Message::Text(FINAL_JSON.to_string()))
+                .await
+                .unwrap();
+            tx.send(Message::Text(r#"{"type":"Metadata"}"#.to_string()))
+                .await
+                .unwrap();
+        });
+        let mut stream = Box::pin(futures_util::stream::unfold(rx, |mut receiver| async {
+            receiver
+                .recv()
+                .await
+                .map(|message| (Ok::<Message, String>(message), receiver))
+        }));
+        let result = drain_final_results(
+            &mut stream,
+            Duration::from_millis(100),
+            String::new(),
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(result.transcript, "hello world.");
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn final_result_deadline_does_not_wait_forever() {
+        let (_tx, rx) = mpsc::channel::<Message>(1);
+        let mut stream = Box::pin(futures_util::stream::unfold(rx, |mut receiver| async {
+            receiver
+                .recv()
+                .await
+                .map(|message| (Ok::<Message, String>(message), receiver))
+        }));
+        let result = drain_final_results(
+            &mut stream,
+            Duration::from_millis(10),
+            "already final".to_string(),
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(result.transcript, "already final");
+        assert!(result.error.unwrap().contains("Timed out"));
+    }
+
+    #[tokio::test]
+    async fn final_result_protocol_error_is_returned() {
+        let mut stream = Box::pin(futures_util::stream::iter([Err::<Message, _>(
+            "simulated socket failure",
+        )]));
+        let result = drain_final_results(
+            &mut stream,
+            Duration::from_millis(100),
+            "already final".to_string(),
+            |_, _| {},
+        )
+        .await;
+
+        assert_eq!(result.transcript, "already final");
+        assert!(result.error.unwrap().contains("simulated socket failure"));
+    }
+
+    #[test]
+    fn cleanup_generation_guard_rejects_stale_worker() {
+        let active = std::sync::atomic::AtomicU64::new(8);
+        assert!(active
+            .compare_exchange(7, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err());
+        assert_eq!(active.load(Ordering::Acquire), 8);
+    }
+
+    #[test]
+    fn auth_scheme_accepts_bearer_and_defaults_to_token() {
+        assert_eq!(
+            AuthScheme::default().authorization("secret"),
+            "Token secret"
+        );
+        let bearer: AuthScheme = serde_json::from_str(r#""bearer""#).unwrap();
+        assert_eq!(bearer.authorization("secret"), "Bearer secret");
     }
 }

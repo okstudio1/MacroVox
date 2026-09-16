@@ -6,15 +6,17 @@
 //! - `process_audio_frame` — cpal callback body; updates level, buffer, and streams PCM
 //! - `build_input_stream`  — open a cpal capture stream, dispatching on sample format
 
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::deepgram_ws::{DgMessage, DgSender};
 use cpal::traits::DeviceTrait;
 use log::warn;
-use crate::deepgram_ws::{DgMessage, DgSender};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Lock a mutex, recovering from poison if a prior thread panicked.
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Counter for frames dropped due to channel backpressure. Surfaced via a
@@ -45,8 +47,8 @@ pub fn pcm_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
 
     // fmt chunk (16-byte PCM format)
     buf.extend_from_slice(b"fmt ");
-    buf.extend_from_slice(&16u32.to_le_bytes());         // chunk size
-    buf.extend_from_slice(&1u16.to_le_bytes());          // PCM = 1
+    buf.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM = 1
     buf.extend_from_slice(&channels.to_le_bytes());
     buf.extend_from_slice(&sample_rate.to_le_bytes());
     buf.extend_from_slice(&byte_rate.to_le_bytes());
@@ -81,10 +83,22 @@ pub fn f32_to_i16_bytes(samples: &[f32]) -> Vec<u8> {
 
 // ── Capture callback ──────────────────────────────────────────────────────────
 
-/// Maximum recording buffer size in f32 samples.
-/// At 16 kHz mono this is 5 minutes of audio (~18 MB of f32 data).
-/// Prevents unbounded memory growth if the renderer never calls recording_stop.
-const MAX_BUFFER_SAMPLES: usize = 16_000 * 60 * 5;
+/// Maximum amount of PCM retained for batch transcription and voice history.
+pub const MAX_RECORDING_DURATION_SECS: u64 = 5 * 60;
+pub const MAX_RECORDING_BUFFER_BYTES: usize = 128 * 1024 * 1024;
+
+/// Calculates the sample cap from the active device format and requested duration.
+/// The result is bounded against integer overflow on unusual device profiles.
+pub fn recording_sample_limit(sample_rate: u32, channels: u16, duration_secs: u64) -> usize {
+    let channel_count = usize::from(channels.max(1));
+    let samples = u64::from(sample_rate)
+        .saturating_mul(u64::from(channels.max(1)))
+        .saturating_mul(duration_secs);
+    let duration_limit = usize::try_from(samples).unwrap_or(usize::MAX);
+    let byte_limit =
+        (MAX_RECORDING_BUFFER_BYTES / std::mem::size_of::<f32>()) / channel_count * channel_count;
+    duration_limit.min(byte_limit)
+}
 
 /// Called from the cpal input-stream callback with a slice of f32 samples.
 ///
@@ -101,6 +115,8 @@ pub fn process_audio_frame(
     buffer: &Arc<Mutex<Vec<f32>>>,
     is_recording: &Arc<Mutex<bool>>,
     dg_sender: &Arc<Mutex<Option<DgSender>>>,
+    max_buffer_samples: usize,
+    limit_reached: &Arc<AtomicBool>,
 ) {
     if data.is_empty() {
         return;
@@ -116,10 +132,15 @@ pub fn process_audio_frame(
         // Cap at MAX_BUFFER_SAMPLES to prevent unbounded memory growth.
         {
             let mut buf = lock_or_recover(buffer);
-            let remaining = MAX_BUFFER_SAMPLES.saturating_sub(buf.len());
+            let remaining = max_buffer_samples.saturating_sub(buf.len());
             if remaining > 0 {
                 let take = data.len().min(remaining);
                 buf.extend_from_slice(&data[..take]);
+                if take < data.len() {
+                    limit_reached.store(true, Ordering::Release);
+                }
+            } else {
+                limit_reached.store(true, Ordering::Release);
             }
         }
 
@@ -164,56 +185,86 @@ pub fn build_input_stream(
     buffer: Arc<Mutex<Vec<f32>>>,
     is_recording: Arc<Mutex<bool>>,
     dg_sender: Arc<Mutex<Option<DgSender>>>,
+    limit_reached: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let err_fn = |e| eprintln!("[MacroVox audio] stream error: {e}");
+    let max_buffer_samples = recording_sample_limit(
+        config.sample_rate().0,
+        config.channels(),
+        MAX_RECORDING_DURATION_SECS,
+    );
 
     match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config.config(),
             move |data: &[f32], _| {
-                process_audio_frame(data, &level, &buffer, &is_recording, &dg_sender)
+                process_audio_frame(
+                    data,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    max_buffer_samples,
+                    &limit_reached,
+                )
             },
             err_fn,
             None,
         ),
-        cpal::SampleFormat::I16 => {
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[i16], _| {
-                    let floats: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                    process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
-                },
-                err_fn,
-                None,
-            )
-        }
-        cpal::SampleFormat::I32 => {
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[i32], _| {
-                    let floats: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
-                    process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
-                },
-                err_fn,
-                None,
-            )
-        }
-        cpal::SampleFormat::U16 => {
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[u16], _| {
-                    let floats: Vec<f32> = data
-                        .iter()
-                        .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                        .collect();
-                    process_audio_frame(&floats, &level, &buffer, &is_recording, &dg_sender);
-                },
-                err_fn,
-                None,
-            )
-        }
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            &config.config(),
+            move |data: &[i16], _| {
+                let floats: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                process_audio_frame(
+                    &floats,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    max_buffer_samples,
+                    &limit_reached,
+                );
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I32 => device.build_input_stream(
+            &config.config(),
+            move |data: &[i32], _| {
+                let floats: Vec<f32> = data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
+                process_audio_frame(
+                    &floats,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    max_buffer_samples,
+                    &limit_reached,
+                );
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => device.build_input_stream(
+            &config.config(),
+            move |data: &[u16], _| {
+                let floats: Vec<f32> = data
+                    .iter()
+                    .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                    .collect();
+                process_audio_frame(
+                    &floats,
+                    &level,
+                    &buffer,
+                    &is_recording,
+                    &dg_sender,
+                    max_buffer_samples,
+                    &limit_reached,
+                );
+            },
+            err_fn,
+            None,
+        ),
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
     }
 }
@@ -276,6 +327,10 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    fn no_limit() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
     #[test]
     fn process_audio_frame_updates_level() {
         let level = Arc::new(Mutex::new(0.0f64));
@@ -283,10 +338,21 @@ mod tests {
         let is_recording = Arc::new(Mutex::new(false));
 
         // RMS of [1.0, -1.0] = sqrt((1+1)/2) = 1.0
-        process_audio_frame(&[1.0, -1.0], &level, &buffer, &is_recording, &no_sender());
+        process_audio_frame(
+            &[1.0, -1.0],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            usize::MAX,
+            &no_limit(),
+        );
         let lvl = *level.lock().unwrap();
         assert!((lvl - 1.0).abs() < 1e-6, "level = {lvl}");
-        assert!(buffer.lock().unwrap().is_empty(), "no buffering when not recording");
+        assert!(
+            buffer.lock().unwrap().is_empty(),
+            "no buffering when not recording"
+        );
     }
 
     #[test]
@@ -295,7 +361,15 @@ mod tests {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let is_recording = Arc::new(Mutex::new(true));
 
-        process_audio_frame(&[0.1, 0.2, 0.3], &level, &buffer, &is_recording, &no_sender());
+        process_audio_frame(
+            &[0.1, 0.2, 0.3],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            usize::MAX,
+            &no_limit(),
+        );
         let buf = buffer.lock().unwrap().clone();
         assert_eq!(buf, vec![0.1, 0.2, 0.3]);
     }
@@ -305,7 +379,15 @@ mod tests {
         let level = Arc::new(Mutex::new(0.5f64));
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let is_recording = Arc::new(Mutex::new(false));
-        process_audio_frame(&[], &level, &buffer, &is_recording, &no_sender());
+        process_audio_frame(
+            &[],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            usize::MAX,
+            &no_limit(),
+        );
         // level unchanged
         assert!((0.5 - *level.lock().unwrap()).abs() < 1e-9);
     }
@@ -322,7 +404,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<DgMessage>(500);
         let dg_sender = Arc::new(Mutex::new(Some(tx)));
 
-        process_audio_frame(&[0.5, -0.5], &level, &buffer, &is_recording, &dg_sender);
+        process_audio_frame(
+            &[0.5, -0.5],
+            &level,
+            &buffer,
+            &is_recording,
+            &dg_sender,
+            usize::MAX,
+            &no_limit(),
+        );
 
         // Should have received one Pcm message.
         let msg = rx.blocking_recv().expect("expected Pcm message");
@@ -349,10 +439,51 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<DgMessage>(500);
         let dg_sender = Arc::new(Mutex::new(Some(tx)));
 
-        process_audio_frame(&[0.5], &level, &buffer, &is_recording, &dg_sender);
+        process_audio_frame(
+            &[0.5],
+            &level,
+            &buffer,
+            &is_recording,
+            &dg_sender,
+            usize::MAX,
+            &no_limit(),
+        );
 
         // Nothing should have been sent.
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn duration_limit_accounts_for_sample_rate_and_channels() {
+        assert_eq!(recording_sample_limit(48_000, 2, 60), 5_760_000);
+    }
+
+    #[test]
+    fn duration_limit_has_a_hard_memory_ceiling_and_whole_frames() {
+        let limit = recording_sample_limit(u32::MAX, 7, u64::MAX);
+        assert!(limit * std::mem::size_of::<f32>() <= MAX_RECORDING_BUFFER_BYTES);
+        assert_eq!(limit % 7, 0);
+    }
+
+    #[test]
+    fn process_audio_frame_surfaces_buffer_limit() {
+        let level = Arc::new(Mutex::new(0.0f64));
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let is_recording = Arc::new(Mutex::new(true));
+        let limit_reached = no_limit();
+
+        process_audio_frame(
+            &[0.1, 0.2, 0.3],
+            &level,
+            &buffer,
+            &is_recording,
+            &no_sender(),
+            2,
+            &limit_reached,
+        );
+
+        assert_eq!(*buffer.lock().unwrap(), vec![0.1, 0.2]);
+        assert!(limit_reached.load(Ordering::Acquire));
     }
 
     // ── f32_to_i16_bytes ──────────────────────────────────────────────────────

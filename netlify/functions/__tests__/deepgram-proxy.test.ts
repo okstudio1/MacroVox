@@ -6,11 +6,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mockGetUser = vi.fn()
 const mockFrom = vi.fn()
+const mockRpc = vi.fn()
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: () => ({
     auth: { getUser: mockGetUser },
     from: mockFrom,
+    rpc: mockRpc,
   }),
 }))
 
@@ -31,7 +33,7 @@ function makeEvent(overrides: Partial<{
     headers: {
       authorization: 'Bearer test-token',
       'content-type': 'audio/wav',
-      origin: 'https://tauri.localhost',
+      origin: 'http://tauri.localhost',
     },
     body: '',
     isBase64Encoded: false,
@@ -76,6 +78,7 @@ function mockProUser() {
 describe('deepgram-proxy', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockRpc.mockResolvedValue({ data: true, error: null })
   })
 
   it('returns 204 for OPTIONS preflight', async () => {
@@ -156,5 +159,25 @@ describe('deepgram-proxy', () => {
     expect(result?.statusCode).toBe(502)
 
     fetchSpy.mockRestore()
+  })
+
+  it('rejects a lookalike Windows app origin', async () => {
+    const result = await handler(makeEvent({
+      headers: {
+        authorization: 'Bearer test-token',
+        'content-type': 'audio/wav',
+        origin: 'http://tauri.localhost.evil.example',
+      },
+    }), {} as never, vi.fn())
+    expect(result?.statusCode).toBe(403)
+  })
+
+  it('fails closed when quota storage is unavailable', async () => {
+    mockProUser()
+    mockRpc.mockResolvedValue({ data: null, error: { message: 'database down' } })
+    const fetchSpy = vi.spyOn(global, 'fetch')
+    const result = await handler(makeEvent(), {} as never, vi.fn())
+    expect(result?.statusCode).toBe(503)
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

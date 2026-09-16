@@ -10,6 +10,7 @@ export const SITE_URL = import.meta.env.DEV
 export const API = {
   claudeProxy:      `${SITE_URL}/.netlify/functions/claude-proxy`,
   deepgramProxy:    `${SITE_URL}/.netlify/functions/deepgram-proxy`,
+  deepgramToken:    `${SITE_URL}/.netlify/functions/deepgram-token`,
 } as const
 
 // Haiku for fast cleanup tasks; Sonnet for quality writing generation

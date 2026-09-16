@@ -1,9 +1,9 @@
 ; MacroVox NSIS installer hooks for Tauri 2.
 ;
-; NSIS_HOOK_PREINSTALL  — runs before file copy. Kill running instance,
+; NSIS_HOOK_PREINSTALL  : runs before file copy. Kill running instance,
 ;                         detect and remove previous installs from other dirs.
-; NSIS_HOOK_POSTINSTALL — runs after file copy. Force-create shortcuts.
-; NSIS_HOOK_POSTUNINSTALL — runs after uninstall. Clean up shortcuts.
+; NSIS_HOOK_POSTINSTALL : runs after file copy. Force-create shortcuts.
+; NSIS_HOOK_POSTUNINSTALL : runs after uninstall. Clean up shortcuts.
 
 !macro NSIS_HOOK_PREINSTALL
   ; --- Kill running MacroVox process ---
@@ -30,19 +30,16 @@
       pollDone:
   ${EndIf}
 
-  ; --- Remove previous per-user install (HKCU) from a different directory ---
-  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MacroVox" "UninstallString"
+  ; HKCU is user-writable. Never execute its UninstallString in this
+  ; elevated per-machine installer. In-place upgrades use Tauri's normal
+  ; installer path. Older per-user installs can be removed in Windows Settings.
   ReadRegStr $2 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MacroVox" "InstallLocation"
-  ${If} $0 != ""
-  ${AndIf} $2 != ""
+  ${If} $2 != ""
   ${AndIf} $2 != "$INSTDIR"
   ${AndIf} $2 != "$INSTDIR\"
-    ReadRegStr $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MacroVox" "DisplayVersion"
-    MessageBox MB_YESNO|MB_ICONQUESTION "A previous version of MacroVox (v$1) was found at:$\r$\n$2$\r$\n$\r$\nWould you like to remove it?$\r$\n(Recommended: Yes)" IDYES removePrevHKCU IDNO skipPrevHKCU
-    removePrevHKCU:
-      ExecWait '"$0" /S'
-      Sleep 2000
-    skipPrevHKCU:
+    IfSilent skipPerUserNotice
+    MessageBox MB_OK|MB_ICONINFORMATION "An older per-user installation of MacroVox was found.$\r$\n$\r$\nYou can remove it separately in Windows Settings > Apps from that user account. This installer will leave it in place."
+    skipPerUserNotice:
   ${EndIf}
 
   ; --- Remove previous per-machine install (HKLM) from a different directory ---

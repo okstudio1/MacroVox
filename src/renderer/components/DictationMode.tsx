@@ -2,9 +2,8 @@
  * MacroVox — Dictation window component.
  *
  * Owns the entire record/transcribe/post-process flow:
- *   1. Loads the Deepgram API key from the current Supabase session (managed
- *      keys for Pro subscribers); polls every 5 s to pick up sign-in from the
- *      settings window.
+ *   1. Resolves local key access or managed transcription entitlement and
+ *      listens for auth changes from either window.
  *   2. Starts capture in either `'streaming'` mode (live WebSocket; transcripts
  *      arrive via `onTranscript` events) or `'batch'` mode (record then upload
  *      to Deepgram pre-recorded API on stop).
@@ -28,6 +27,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Mic, MicOff, Copy, Check, Trash2, Loader2, Settings, Minus, X } from 'lucide-react'
 import { usePostProcessing } from '../hooks/usePostProcessing'
+import { UpdateNotice } from './UpdateNotice'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import * as ipc from '../lib/tauri-ipc'
 import type { AppUser } from '../lib/tauri-ipc'
@@ -49,6 +49,19 @@ export function DictationMode() {
   const audioLevelIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const operationInProgressRef = useRef(false)
   const autoCutoffFiredRef = useRef(false)
+  const activeSessionIdRef = useRef<number | null>(null)
+  const recordingModeRef = useRef<'batch' | 'streaming'>('batch')
+  const sessionBaseTranscriptRef = useRef('')
+  const transcriptRef = useRef('')
+  const transcriptRevisionRef = useRef(0)
+  const recordingGenerationRef = useRef(0)
+  const authLoadGenerationRef = useRef(0)
+  const currentUserIdRef = useRef<string | null>(null)
+  const startRecordingHandlerRef = useRef<() => Promise<void>>(async () => {})
+  const stopRecordingHandlerRef = useRef<() => Promise<void>>(async () => {})
+  const streamingStartPendingRef = useRef(false)
+  const pendingStreamingErrorsRef = useRef(new Map<number, string>())
+  const [interimTranscript, setInterimTranscript] = useState('')
 
   // Quick Dictation settings from localStorage
   const [autoCopyOnStop, setAutoCopyOnStop] = useState(() =>
@@ -71,10 +84,27 @@ export function DictationMode() {
   )
   const streamingTranscriptRef = useRef('')
 
-  const { postProcess, isPostProcessing } = usePostProcessing({
+  const { postProcess, isPostProcessing, cancelPostProcessing } = usePostProcessing({
     useProxy: !!user,
     userId: user?.id,
   })
+
+  const commitTranscript = useCallback((value: string) => {
+    transcriptRef.current = value
+    transcriptRevisionRef.current += 1
+    setTranscript(value)
+  }, [])
+
+  const copyTranscript = useCallback(async (text: string): Promise<boolean> => {
+    const result = await ipc.copyToClipboard(text)
+    if (!result.success) {
+      setError(result.error || 'Copy failed')
+      return false
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+    return true
+  }, [])
 
   // Listen for settings changes from backend
   useEffect(() => {
@@ -112,18 +142,38 @@ export function DictationMode() {
 
   // Listen for streaming transcripts from Deepgram
   useEffect(() => {
-    const cleanupTranscript = ipc.onTranscript(({ transcript: text, isFinal }) => {
+    const cleanupTranscript = ipc.onTranscript(({ transcript: text, isFinal, sessionId }) => {
+      if (sessionId !== activeSessionIdRef.current) return
       if (isFinal && text) {
         streamingTranscriptRef.current = streamingTranscriptRef.current
           ? streamingTranscriptRef.current + ' ' + text
           : text
+        transcriptRef.current = streamingTranscriptRef.current
         setTranscript(streamingTranscriptRef.current)
+        setInterimTranscript('')
+      } else {
+        setInterimTranscript(text)
       }
     })
-    const cleanupError = ipc.onStreamingError(({ error }) => {
+    const cleanupError = ipc.onStreamingError(({ error, sessionId }) => {
+      if (activeSessionIdRef.current === null && streamingStartPendingRef.current) {
+        if (!pendingStreamingErrorsRef.current.has(sessionId) && pendingStreamingErrorsRef.current.size >= 8) {
+          const oldestSessionId = pendingStreamingErrorsRef.current.keys().next().value
+          if (oldestSessionId !== undefined) pendingStreamingErrorsRef.current.delete(oldestSessionId)
+        }
+        pendingStreamingErrorsRef.current.set(sessionId, error)
+        return
+      }
+      if (sessionId !== activeSessionIdRef.current) return
       setError(error)
       setIsRecording(false)
       setAudioLevel(0)
+      activeSessionIdRef.current = null
+      setInterimTranscript('')
+      if (autoStopTimerRef.current) {
+        clearTimeout(autoStopTimerRef.current)
+        autoStopTimerRef.current = null
+      }
       if (audioLevelIntervalRef.current) {
         clearInterval(audioLevelIntervalRef.current)
         audioLevelIntervalRef.current = null
@@ -133,18 +183,25 @@ export function DictationMode() {
   }, [])
 
   const loadApiKey = useCallback(async () => {
+    const loadGeneration = ++authLoadGenerationRef.current
     // Bring-your-own-key wins: if the user saved a Deepgram key in Settings →
     // API Keys, use it directly and skip the managed-key lookup entirely. This
     // lets the app run with no sign-in / subscription.
     const ownKey = (localStorage.getItem('user_deepgram_key') || '').trim()
     if (ownKey) {
-      setApiKey(ownKey)
-      setIsLoadingKey(false)
+      if (loadGeneration === authLoadGenerationRef.current) {
+        setApiKey(ownKey)
+        setIsLoadingKey(false)
+      }
       // Still resolve the user (if signed in) so account UI/post-processing
       // proxy stays available, but don't let a failure block recording.
       try {
         const userResult = await auth.getUser()
-        if (userResult.success && userResult.user) setUser(userResult.user)
+        if (loadGeneration === authLoadGenerationRef.current) {
+          const nextUser = userResult.success && userResult.user ? userResult.user : null
+          currentUserIdRef.current = nextUser?.id ?? null
+          setUser(nextUser)
+        }
       } catch {}
       return
     }
@@ -152,11 +209,14 @@ export function DictationMode() {
     try {
       const userResult = await auth.getUser()
       if (userResult.success && userResult.user) {
+        if (loadGeneration !== authLoadGenerationRef.current) return
+        currentUserIdRef.current = userResult.user.id
         setUser(userResult.user)
         try {
           const keysResult = await auth.getManagedKeys()
-          if (keysResult.success && keysResult.deepgramKey) {
-            setApiKey(keysResult.deepgramKey)
+          if (loadGeneration !== authLoadGenerationRef.current) return
+          if (keysResult.success && keysResult.hasManagedKeys) {
+            setApiKey('managed')
             setIsLoadingKey(false)
             return
           }
@@ -166,64 +226,125 @@ export function DictationMode() {
       }
     } catch {}
 
-    setApiKey(null)
-    setIsLoadingKey(false)
+    if (loadGeneration === authLoadGenerationRef.current) {
+      currentUserIdRef.current = null
+      setUser(null)
+      setApiKey(null)
+      setIsLoadingKey(false)
+    }
   }, [])
 
   useEffect(() => {
     loadApiKey()
   }, [loadApiKey])
 
-  // Re-load key each time the window is shown via Ctrl+Space
   useEffect(() => {
-    const cleanup = ipc.onQuickDictationToggle(() => {
+    const invalidateAuthBoundWork = () => {
+      authLoadGenerationRef.current += 1
+      recordingGenerationRef.current += 1
+      transcriptRevisionRef.current += 1
+      cancelPostProcessing()
+    }
+    const cleanupLocal = auth.onAuthStateChange((nextUser, event) => {
+      const nextUserId = nextUser?.id ?? null
+      const identityChanged = currentUserIdRef.current !== nextUserId
+      currentUserIdRef.current = nextUserId
+      setUser(nextUser)
+      if (event === 'TOKEN_REFRESHED' || !identityChanged) return
+      invalidateAuthBoundWork()
+      const ownKey = (localStorage.getItem('user_deepgram_key') || '').trim()
+      setApiKey(ownKey || null)
+      setIsLoadingKey(false)
+      ipc.emitAuthStateChanged().catch(() => {})
       loadApiKey()
     })
-    return cleanup
-  }, [loadApiKey])
+    const cleanupRemote = ipc.onAuthStateChanged(() => {
+      invalidateAuthBoundWork()
+      loadApiKey()
+    })
+    return () => {
+      cleanupLocal()
+      cleanupRemote()
+    }
+  }, [cancelPostProcessing, loadApiKey])
 
-  // Periodically re-check auth in case user logs in from settings window
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (!user) loadApiKey()
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [loadApiKey, user])
-
-  // Re-resolve the active key the moment a bring-your-own Deepgram key is saved
-  // in the settings window. The periodic re-check above is gated on `!user`, so
-  // a signed-in user wouldn't otherwise pick up a newly-entered key until restart.
+  // Re-resolve access when a bring-your-own Deepgram key changes in Settings.
   useEffect(() => {
     const cleanup = ipc.onSettingsChanged((settings) => {
-      if ('user_deepgram_key' in settings) loadApiKey()
+      if ('user_deepgram_key' in settings) {
+        recordingGenerationRef.current += 1
+        transcriptRevisionRef.current += 1
+        cancelPostProcessing()
+        loadApiKey()
+      }
     })
     return cleanup
-  }, [loadApiKey])
+  }, [cancelPostProcessing, loadApiKey])
 
   const handleStartRecording = async () => {
     if (!apiKey || operationInProgressRef.current) return
+    if (apiKey === 'managed') {
+      setError('Managed transcription is unavailable in this build. Add a personal Deepgram key in Settings.')
+      return
+    }
     operationInProgressRef.current = true
+    const generation = ++recordingGenerationRef.current
+    recordingModeRef.current = transcriptionMode === 'streaming' ? 'streaming' : 'batch'
     setError(null)
+    setInterimTranscript('')
+    cancelPostProcessing()
 
     if (clearOnNewRecording) {
-      setTranscript('')
-      streamingTranscriptRef.current = ''
+      commitTranscript('')
     }
+    sessionBaseTranscriptRef.current = clearOnNewRecording ? '' : transcriptRef.current
+    streamingTranscriptRef.current = ''
 
     setIsPreparing(true)
     setAudioLevel(0)
 
     try {
       if (transcriptionMode === 'streaming') {
-        if (!clearOnNewRecording) streamingTranscriptRef.current = transcript || ''
+        pendingStreamingErrorsRef.current.clear()
+        streamingStartPendingRef.current = true
         const result = await ipc.startDeepgram(apiKey)
+        streamingStartPendingRef.current = false
+        if (generation !== recordingGenerationRef.current) {
+          pendingStreamingErrorsRef.current.clear()
+          if (result.success && result.sessionId !== undefined) {
+            await ipc.stopDeepgram(result.sessionId).catch(() => {})
+          }
+          setIsPreparing(false)
+          return
+        }
         if (!result.success) {
+          pendingStreamingErrorsRef.current.clear()
           setError(result.error || 'Failed to start streaming')
           setIsPreparing(false)
           return
         }
+        if (result.sessionId === undefined) {
+          pendingStreamingErrorsRef.current.clear()
+          setError('Streaming session did not start correctly')
+          setIsPreparing(false)
+          return
+        }
+        const startupError = pendingStreamingErrorsRef.current.get(result.sessionId)
+        pendingStreamingErrorsRef.current.clear()
+        if (startupError) {
+          await ipc.stopDeepgram(result.sessionId).catch(() => {})
+          setError(startupError)
+          setIsPreparing(false)
+          return
+        }
+        activeSessionIdRef.current = result.sessionId
       } else {
         const result = await ipc.startRecording()
+        if (generation !== recordingGenerationRef.current) {
+          if (result.success) await ipc.stopAudio().catch(() => {})
+          setIsPreparing(false)
+          return
+        }
         if (!result.success) {
           setError(result.error || 'Failed to start')
           setIsPreparing(false)
@@ -246,17 +367,22 @@ export function DictationMode() {
       const seconds = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 5), 300) : 30
       autoStopTimerRef.current = setTimeout(async () => {
         autoCutoffFiredRef.current = true
-        await handleStopRecording()
+        await stopRecordingHandlerRef.current()
         autoCutoffFiredRef.current = false
       }, seconds * 1000)
     }
+    } catch (startError) {
+      streamingStartPendingRef.current = false
+      pendingStreamingErrorsRef.current.clear()
+      setIsPreparing(false)
+      setError(startError instanceof Error ? startError.message : 'Failed to start recording')
     } finally {
       operationInProgressRef.current = false
     }
   }
 
   const handleStopRecording = async () => {
-    if (!apiKey || operationInProgressRef.current) return
+    if (operationInProgressRef.current) return
     operationInProgressRef.current = true
 
     try {
@@ -272,69 +398,120 @@ export function DictationMode() {
     setIsRecording(false)
     setAudioLevel(0)
 
-    if (transcriptionMode === 'streaming') {
-      await ipc.stopDeepgram()
-      const currentText = streamingTranscriptRef.current
+    if (recordingModeRef.current === 'streaming') {
+      setIsProcessing(true)
+      const stopGeneration = recordingGenerationRef.current
+      const stopRevision = transcriptRevisionRef.current
+      const stoppingSessionId = activeSessionIdRef.current ?? undefined
+      activeSessionIdRef.current = null
+      setInterimTranscript('')
+      const stopResult = await ipc.stopDeepgram(stoppingSessionId)
+      setIsProcessing(false)
+      const currentText = stopResult.transcript || ''
+      if (!stopResult.success) {
+        setError(stopResult.error
+          ? `Transcript may be incomplete: ${stopResult.error}`
+          : 'Transcript may be incomplete because streaming did not close cleanly')
+      } else if (stopResult.limitReached) {
+        setError('Recording stopped at the audio limit; the transcript may be incomplete')
+      }
       if (currentText) {
-        // Save to voice buffer (fire-and-forget — backend checks if enabled).
-        // Broadcast across webviews so the settings window's recordings list
-        // and usage bar refresh without requiring an app restart. Uses Tauri's
-        // event bus because the dictation HUD and settings panel are separate
-        // webviews — DOM CustomEvents don't cross that boundary.
-        ipc.voiceBufferSave(currentText)
-          .then(() => ipc.emitVoiceBufferUpdated())
-          .catch(() => {})
+        const baseText = autoCutoffFiredRef.current ? '' : sessionBaseTranscriptRef.current
+        const rawText = baseText ? `${baseText} ${currentText}` : currentText
+        if (
+          stopGeneration !== recordingGenerationRef.current ||
+          stopRevision !== transcriptRevisionRef.current
+        ) return
+        commitTranscript(rawText)
         // Optimistic: copy raw transcript immediately, don't wait for cleanup
         if (autoCopyOnStop) {
-          await ipc.copyToClipboard(currentText)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 2000)
+          const copiedSuccessfully = await copyTranscript(rawText)
+          if (autoPasteEnabled && copiedSuccessfully) {
+            const pasteResult = await ipc.autoPaste()
+            if (!pasteResult.success) setError(pasteResult.error || 'Auto-paste failed')
+          }
         }
-
-        if (autoPasteEnabled && autoCopyOnStop) ipc.autoPaste()
 
         // AI cleanup in background — update clipboard if result differs.
         // Catch rejection so a failed proxy call doesn't leave isPostProcessing
         // stuck and doesn't surface as an unhandled rejection.
         if (aiCleanupEnabled) {
+          const expectedRevision = transcriptRevisionRef.current
+          const expectedGeneration = recordingGenerationRef.current
           postProcess(currentText)
             .then((cleaned) => {
-              if (cleaned && cleaned !== currentText) {
-                setTranscript(cleaned)
-                streamingTranscriptRef.current = cleaned
-                if (autoCopyOnStop) ipc.copyToClipboard(cleaned)
+              if (
+                cleaned &&
+                cleaned !== currentText &&
+                expectedRevision === transcriptRevisionRef.current &&
+                expectedGeneration === recordingGenerationRef.current &&
+                transcriptRef.current === rawText
+              ) {
+                const cleanedFull = baseText ? `${baseText} ${cleaned}` : cleaned
+                commitTranscript(cleanedFull)
+                if (autoCopyOnStop) copyTranscript(cleanedFull)
               }
             })
             .catch(() => { setError('AI cleanup failed') })
         }
+      } else if (!stopResult.success && stopResult.error) {
+        setError(stopResult.error)
       }
     } else {
       setIsProcessing(true)
+      const stopGeneration = recordingGenerationRef.current
+      const stopRevision = transcriptRevisionRef.current
+      const audioStopResult = await ipc.stopAudio()
+      if (!audioStopResult.success) {
+        setIsProcessing(false)
+        setError(audioStopResult.error || 'Failed to stop microphone capture')
+        return
+      }
+      if (!apiKey) {
+        setIsProcessing(false)
+        setError('Recording stopped, but transcription requires a signed-in account or API key')
+        return
+      }
+      if (apiKey === 'managed') {
+        setIsProcessing(false)
+        setError('Recording stopped, but managed transcription is unavailable in this build. Add a personal Deepgram key in Settings.')
+        return
+      }
       const result = await ipc.stopRecording(apiKey)
       setIsProcessing(false)
       if (result.success && result.transcript) {
         const rawSegment = result.transcript
-        const prevText = autoCutoffFiredRef.current ? '' : transcript
+        const prevText = autoCutoffFiredRef.current ? '' : sessionBaseTranscriptRef.current
         const rawText = prevText ? prevText + ' ' + rawSegment : rawSegment
-        setTranscript(rawText)
+        if (
+          stopGeneration !== recordingGenerationRef.current ||
+          stopRevision !== transcriptRevisionRef.current
+        ) return
+        commitTranscript(rawText)
 
         if (autoCopyOnStop) {
-          await ipc.copyToClipboard(rawText)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 2000)
+          const copiedSuccessfully = await copyTranscript(rawText)
+          if (autoPasteEnabled && copiedSuccessfully) {
+            const pasteResult = await ipc.autoPaste()
+            if (!pasteResult.success) setError(pasteResult.error || 'Auto-paste failed')
+          }
         }
 
-        if (autoPasteEnabled && autoCopyOnStop) ipc.autoPaste()
-
         if (aiCleanupEnabled) {
+          const expectedRevision = transcriptRevisionRef.current
+          const expectedGeneration = recordingGenerationRef.current
           postProcess(rawSegment)
             .then((cleaned) => {
-              if (cleaned && cleaned !== rawSegment) {
-                setTranscript(prev => {
-                  const cleanedFull = prev.replace(rawSegment, cleaned)
-                  if (autoCopyOnStop) ipc.copyToClipboard(cleanedFull)
-                  return cleanedFull
-                })
+              if (
+                cleaned &&
+                cleaned !== rawSegment &&
+                expectedRevision === transcriptRevisionRef.current &&
+                expectedGeneration === recordingGenerationRef.current &&
+                transcriptRef.current === rawText
+              ) {
+                const cleanedFull = prevText ? `${prevText} ${cleaned}` : cleaned
+                commitTranscript(cleanedFull)
+                if (autoCopyOnStop) copyTranscript(cleanedFull)
               }
             })
             .catch(() => { setError('AI cleanup failed') })
@@ -343,6 +520,9 @@ export function DictationMode() {
         setError(result.error)
       }
     }
+    } catch (stopError) {
+      setIsProcessing(false)
+      setError(stopError instanceof Error ? stopError.message : 'Failed to stop recording')
     } finally {
       operationInProgressRef.current = false
     }
@@ -351,18 +531,22 @@ export function DictationMode() {
   const handleCopy = async () => {
     if (!transcript) return
     try {
-      await ipc.copyToClipboard(transcript)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      await copyTranscript(transcript)
     } catch {
       setError('Copy failed')
     }
   }
 
   const handleClear = () => {
-    setTranscript('')
+    recordingGenerationRef.current += 1
+    cancelPostProcessing()
+    commitTranscript('')
+    setInterimTranscript('')
     setError(null)
   }
+
+  startRecordingHandlerRef.current = handleStartRecording
+  stopRecordingHandlerRef.current = handleStopRecording
 
   // Auto-resize textarea
   useEffect(() => {
@@ -376,15 +560,15 @@ export function DictationMode() {
   useEffect(() => {
     const cleanupStart = ipc.onQuickDictationStart(() => {
       if (apiKey && !isRecording && !isPreparing && !isProcessing) {
-        handleStartRecording()
+        startRecordingHandlerRef.current()
       }
     })
 
     const cleanupToggle = ipc.onQuickDictationToggle(() => {
       if (isRecording) {
-        handleStopAndCopy()
+        stopRecordingHandlerRef.current()
       } else if (apiKey && !isPreparing && !isProcessing) {
-        handleStartRecording()
+        startRecordingHandlerRef.current()
       }
     })
 
@@ -393,60 +577,6 @@ export function DictationMode() {
       cleanupToggle()
     }
   }, [apiKey, isRecording, isPreparing, isProcessing])
-
-  const handleStopAndCopy = async () => {
-    if (!apiKey || operationInProgressRef.current) return
-    operationInProgressRef.current = true
-
-    try {
-    if (autoStopTimerRef.current) {
-      clearTimeout(autoStopTimerRef.current)
-      autoStopTimerRef.current = null
-    }
-    if (audioLevelIntervalRef.current) {
-      clearInterval(audioLevelIntervalRef.current)
-      audioLevelIntervalRef.current = null
-    }
-
-    setIsRecording(false)
-    setIsProcessing(true)
-    setAudioLevel(0)
-    const result = await ipc.stopRecording(apiKey)
-    setIsProcessing(false)
-    if (result.success && result.transcript) {
-      const rawSegment = result.transcript
-      let rawText = ''
-      setTranscript(prev => {
-        rawText = prev ? prev + ' ' + rawSegment : rawSegment
-        return rawText
-      })
-
-      await ipc.copyToClipboard(rawText)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-
-      if (autoPasteEnabled) ipc.autoPaste()
-
-      if (aiCleanupEnabled) {
-        postProcess(rawSegment)
-          .then((cleaned) => {
-            if (cleaned && cleaned !== rawSegment) {
-              setTranscript(prev => {
-                const cleanedFull = prev.replace(rawSegment, cleaned)
-                ipc.copyToClipboard(cleanedFull)
-                return cleanedFull
-              })
-            }
-          })
-          .catch(() => { setError('AI cleanup failed') })
-      }
-    } else if (!result.success && result.error) {
-      setError(result.error)
-    }
-    } finally {
-      operationInProgressRef.current = false
-    }
-  }
 
   if (isLoadingKey) {
     return (
@@ -495,6 +625,8 @@ export function DictationMode() {
         </div>
       </div>
 
+      <UpdateNotice />
+
       {/* Main content */}
       <>
       <div className="shrink-0 flex flex-col items-center justify-center gap-3 pt-2">
@@ -514,8 +646,9 @@ export function DictationMode() {
 
           <button
             onClick={isRecording ? handleStopRecording : handleStartRecording}
-            disabled={isProcessing || isPreparing || !apiKey}
-            className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg ${(!apiKey || isProcessing || isPreparing) ? 'opacity-50 cursor-not-allowed' : ''}`}
+            disabled={isProcessing || isPreparing || (!apiKey && !isRecording)}
+            aria-label={isRecording ? 'Stop recording' : 'Start recording'}
+            className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg ${((!apiKey && !isRecording) || isProcessing || isPreparing) ? 'opacity-50 cursor-not-allowed' : ''}`}
             style={{
               backgroundColor: isPreparing ? 'var(--warning, #d97706)' : isRecording ? 'var(--danger)' : 'var(--accent-primary)',
               border: `2px solid ${isPreparing ? 'var(--warning, #d97706)' : isRecording ? 'var(--danger)' : 'var(--accent-hover)'}`
@@ -581,11 +714,20 @@ export function DictationMode() {
         <textarea
           ref={textareaRef}
           value={transcript}
-          onChange={(e) => setTranscript(e.target.value)}
+          onChange={(e) => {
+            recordingGenerationRef.current += 1
+            cancelPostProcessing()
+            commitTranscript(e.target.value)
+          }}
           placeholder="Transcript appears here..."
           className="w-full flex-1 min-h-[60px] p-2 rounded text-sm resize-none focus:outline-none overflow-y-auto"
           style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
         />
+        {interimTranscript && (
+          <p className="px-2 text-xs italic" style={{ color: 'var(--text-muted)' }} aria-live="polite">
+            {interimTranscript}
+          </p>
+        )}
 
         {/* Actions */}
         <div className="flex justify-between items-center">

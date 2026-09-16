@@ -6,10 +6,10 @@ mod state;
 mod voice_buffer;
 
 use commands::*;
+use log::debug;
 use state::AppState;
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use log::debug;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -45,7 +45,12 @@ pub fn run() {
         .manage(AppState::default())
         .setup(|app| {
             // Register global hotkey (default: Ctrl+Space)
-            let default_hotkey = app.state::<AppState>().global_hotkey.lock().unwrap().clone();
+            let default_hotkey = app
+                .state::<AppState>()
+                .global_hotkey
+                .lock()
+                .unwrap()
+                .clone();
             if let Ok(shortcut) = commands::parse_shortcut(&default_hotkey) {
                 app.global_shortcut().register(shortcut)?;
             }
@@ -67,11 +72,11 @@ pub fn run() {
 
             // Minimize-to-tray close handler: intercept the close event on the
             // main window and hide instead of destroying if the setting is on.
-            let main_window = app
-                .get_webview_window("main")
-                .ok_or_else(|| Box::<dyn std::error::Error>::from(
+            let main_window = app.get_webview_window("main").ok_or_else(|| {
+                Box::<dyn std::error::Error>::from(
                     "main window failed to initialize — check tauri.conf.json windows[] config",
-                ))?;
+                )
+            })?;
             let _ = main_window.show();
             let _ = main_window.set_focus();
 
@@ -118,9 +123,7 @@ pub fn run() {
                 settings_window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         let state = settings_handle.state::<AppState>();
-                        let quitting = state
-                            .is_quitting
-                            .load(std::sync::atomic::Ordering::SeqCst);
+                        let quitting = state.is_quitting.load(std::sync::atomic::Ordering::SeqCst);
                         if !quitting {
                             api.prevent_close();
                             if let Some(win) = settings_handle.get_webview_window("settings") {

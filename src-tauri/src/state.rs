@@ -1,6 +1,7 @@
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::deepgram_ws::DgSender;
 
@@ -48,7 +49,6 @@ pub struct AppState {
     pub is_quitting: AtomicBool,
 
     // ── Phase 3: cpal WASAPI audio ────────────────────────────────────────────
-
     /// Live cpal capture stream. Dropping it stops audio capture.
     /// `None` when the stream is stopped.
     /// Wrapped in `AudioStream` to satisfy `Send + Sync` bounds (see above).
@@ -65,6 +65,9 @@ pub struct AppState {
     /// True between `recording_start` and `recording_stop`/`recording_cancel`.
     pub is_recording: Arc<Mutex<bool>>,
 
+    /// Set when the duration-aware in-memory PCM cap is reached.
+    pub recording_limit_reached: Arc<AtomicBool>,
+
     /// Sample rate of the active capture stream (default 16 000 Hz).
     /// Updated in `audio_start` after opening the device.
     pub audio_sample_rate: Mutex<u32>,
@@ -74,7 +77,6 @@ pub struct AppState {
     pub audio_channels: Mutex<u16>,
 
     // ── Deepgram ──────────────────────────────────────────────────────────────
-
     /// Keywords forwarded to Deepgram for boosted recognition.
     /// Parsed from the `deepgram_keywords` settings key (newline-separated).
     pub deepgram_keywords: Mutex<Vec<String>>,
@@ -91,7 +93,6 @@ pub struct AppState {
     pub transcription_language: Mutex<String>,
 
     // ── Phase 4: Deepgram WebSocket streaming ─────────────────────────────────
-
     /// Sender half of the channel used to push PCM bytes (and control messages)
     /// to the background Deepgram WebSocket task. `None` when no session is
     /// active. Set by `deepgram_start`, cleared by `deepgram_stop`.
@@ -100,8 +101,22 @@ pub struct AppState {
     /// `AppState` (which is not available in the callback closure).
     pub dg_sender: Arc<Mutex<Option<DgSender>>>,
 
-    // ── Voice buffer ─────────────────────────────────────────────────────────
+    /// Monotonic identifier assigned to the next streaming session.
+    pub next_deepgram_session_id: AtomicU64,
 
+    /// Current streaming session, or zero when no session is active.
+    pub active_deepgram_session_id: AtomicU64,
+
+    /// Serializes streaming connection setup and prevents overlapping starts.
+    pub deepgram_start_lock: tokio::sync::Mutex<()>,
+
+    /// Makes each streaming ownership transition atomic across commands and workers.
+    pub deepgram_lifecycle: Mutex<()>,
+
+    /// Shared HTTP client so batch requests reuse connections and have bounded waits.
+    pub http_client: reqwest::Client,
+
+    // ── Voice buffer ─────────────────────────────────────────────────────────
     /// Directory where voice memo WAV files and manifest are stored.
     /// Set during app setup to `%LOCALAPPDATA%/com.okstudio.macrovox/voice-buffer/`.
     pub voice_buffer_dir: Mutex<PathBuf>,
@@ -111,6 +126,40 @@ pub struct AppState {
 
     /// Maximum voice buffer size in bytes (default 100 MB).
     pub voice_buffer_max_size: Mutex<u64>,
+}
+
+impl AppState {
+    /// Clears streaming resources only when `session_id` still owns the lifecycle.
+    pub fn clear_deepgram_session_if_active(&self, session_id: u64) -> bool {
+        let _lifecycle = self
+            .deepgram_lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self
+            .active_deepgram_session_id
+            .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        *self
+            .is_recording
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        self.dg_sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.audio_stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        *self
+            .audio_level
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = 0.0;
+        true
+    }
 }
 
 impl Default for AppState {
@@ -124,6 +173,7 @@ impl Default for AppState {
             audio_level: Arc::new(Mutex::new(0.0)),
             recording_buffer: Arc::new(Mutex::new(Vec::new())),
             is_recording: Arc::new(Mutex::new(false)),
+            recording_limit_reached: Arc::new(AtomicBool::new(false)),
             audio_sample_rate: Mutex::new(16_000),
             audio_channels: Mutex::new(1),
             deepgram_keywords: Mutex::new(Vec::new()),
@@ -131,6 +181,15 @@ impl Default for AppState {
             global_hotkey: Mutex::new("Ctrl+Space".to_string()),
             transcription_language: Mutex::new("en".to_string()),
             dg_sender: Arc::new(Mutex::new(None)),
+            next_deepgram_session_id: AtomicU64::new(1),
+            active_deepgram_session_id: AtomicU64::new(0),
+            deepgram_start_lock: tokio::sync::Mutex::new(()),
+            deepgram_lifecycle: Mutex::new(()),
+            http_client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
             voice_buffer_dir: Mutex::new(PathBuf::new()),
             voice_buffer_enabled: Mutex::new(false),
             voice_buffer_max_size: Mutex::new(100 * 1024 * 1024), // 100 MB
@@ -169,6 +228,29 @@ mod tests {
     }
 
     #[test]
+    fn stale_cleanup_cannot_clear_a_new_session_transition() {
+        let state = Arc::new(AppState::default());
+        let lifecycle = state.deepgram_lifecycle.lock().unwrap();
+        state.active_deepgram_session_id.store(7, Ordering::Release);
+        *state.is_recording.lock().unwrap() = true;
+
+        let worker_state = Arc::clone(&state);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let stale_cleanup = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            worker_state.clear_deepgram_session_if_active(7)
+        });
+        ready_rx.recv().unwrap();
+
+        state.active_deepgram_session_id.store(8, Ordering::Release);
+        drop(lifecycle);
+
+        assert!(!stale_cleanup.join().unwrap());
+        assert_eq!(state.active_deepgram_session_id.load(Ordering::Acquire), 8);
+        assert!(*state.is_recording.lock().unwrap());
+    }
+
+    #[test]
     fn state_audio_level_shared_arc() {
         let state = AppState::default();
         let level_clone = Arc::clone(&state.audio_level);
@@ -179,7 +261,11 @@ mod tests {
     #[test]
     fn state_recording_buffer_accumulates() {
         let state = AppState::default();
-        state.recording_buffer.lock().unwrap().extend([0.1f32, 0.2, 0.3]);
+        state
+            .recording_buffer
+            .lock()
+            .unwrap()
+            .extend([0.1f32, 0.2, 0.3]);
         assert_eq!(state.recording_buffer.lock().unwrap().len(), 3);
     }
 
@@ -193,8 +279,16 @@ mod tests {
     fn state_voice_buffer_defaults() {
         let state = AppState::default();
         assert!(!*state.voice_buffer_enabled.lock().unwrap());
-        assert_eq!(*state.voice_buffer_max_size.lock().unwrap(), 100 * 1024 * 1024);
-        assert!(state.voice_buffer_dir.lock().unwrap().as_os_str().is_empty());
+        assert_eq!(
+            *state.voice_buffer_max_size.lock().unwrap(),
+            100 * 1024 * 1024
+        );
+        assert!(state
+            .voice_buffer_dir
+            .lock()
+            .unwrap()
+            .as_os_str()
+            .is_empty());
     }
 
     #[test]

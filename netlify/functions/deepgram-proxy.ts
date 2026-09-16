@@ -1,11 +1,11 @@
 /**
- * Netlify Function — deepgram-proxy
+ * Netlify Function: deepgram-proxy
  *
  * Proxies Deepgram transcription requests for authenticated Pro/Team subscribers.
  *
  * NOTE: In the current MacroVox architecture, Deepgram is called directly from
  * the Rust backend using a managed API key retrieved from Supabase. This function
- * exists for future use — e.g. if transcription is moved server-side or for
+ * exists for future use, for example if transcription is moved server-side or for
  * a web-only variant of the app.
  *
  * Request (multipart/form-data or raw audio):
@@ -16,23 +16,23 @@
  * Response: Deepgram transcription JSON
  *
  * Required Netlify environment variables:
- *   SUPABASE_URL              — Supabase project URL
- *   SUPABASE_SERVICE_ROLE_KEY — Supabase service role key
- *   DEEPGRAM_MANAGED_KEY      — Deepgram API key for Pro users
+ *   SUPABASE_URL: Supabase project URL
+ *   SUPABASE_SERVICE_ROLE_KEY: Supabase service role key
+ *   DEEPGRAM_MANAGED_KEY: Deepgram API key for Pro users
  */
 
 import type { Handler } from '@netlify/functions'
 import { createClient } from '@supabase/supabase-js'
+import { reserveQuota } from './_shared/quota'
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024 // 25 MB
 const ALLOWED_AUDIO_TYPES = ['audio/wav', 'audio/webm', 'audio/mp3', 'audio/mpeg', 'audio/flac', 'audio/ogg', 'audio/mp4']
 const ALLOWED_LANGUAGES = ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl', 'ja', 'ko', 'zh', 'ru', 'hi', 'ar']
 const ALLOWED_MODELS = ['nova-3', 'nova-2', 'nova-2-general', 'nova', 'enhanced', 'base']
-const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000 // 1 hour
-const RATE_LIMIT_MAX_CALLS = 300 // per user per hour (higher than claude — audio is lighter)
+const RATE_LIMIT_MAX_CALLS = 300 // per user per hour
 
 // Local dev: skip auth when running under `netlify dev`.
-// Triple-gated — see claude-proxy for rationale.
+// Triple-gated; see claude-proxy for rationale.
 const isDevBypass =
   process.env.NETLIFY_DEV === 'true' &&
   process.env.DEV_BYPASS_AUTH === 'true' &&
@@ -53,7 +53,12 @@ function buildCorsHeaders(corsOrigin: string | null): Record<string, string> {
 
 export const handler: Handler = async (event) => {
   const origin = (event.headers['origin'] ?? '').toLowerCase()
-  const allowedOrigins = ['https://macrovox.tech', 'tauri://localhost', 'https://tauri.localhost']
+  const allowedOrigins = [
+    'https://macrovox.tech',
+    'tauri://localhost',
+    'http://tauri.localhost',
+    'https://tauri.localhost',
+  ]
   if (isDevBypass) allowedOrigins.push('http://localhost:8888', 'http://localhost:5173')
   const corsOrigin = allowedOrigins.includes(origin) ? origin : null
 
@@ -82,7 +87,7 @@ export const handler: Handler = async (event) => {
     }
   }
 
-  // Validate Content-Type — use exact match so ambiguous values like
+  // Validate Content-Type with an exact match so ambiguous values like
   // `audio/wav+png` can't slip through a permissive startsWith() check. We
   // split on ';' first so `audio/ogg; codecs=opus` still matches `audio/ogg`.
   const rawContentType = (event.headers['content-type'] ?? 'audio/wav').toLowerCase()
@@ -135,27 +140,24 @@ export const handler: Handler = async (event) => {
       }
     }
 
-    const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString()
-    const { count: recentCalls } = await supabase
-      .from('api_usage')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', user.id)
-      .eq('service', 'deepgram')
-      .gte('created_at', windowStart)
-
-    if ((recentCalls ?? 0) >= RATE_LIMIT_MAX_CALLS) {
+    let allowed: boolean
+    try {
+      allowed = await reserveQuota(supabase, user.id, 'deepgram', RATE_LIMIT_MAX_CALLS)
+    } catch (error) {
+      console.error('[deepgram-proxy] Quota reservation failed:', error instanceof Error ? error.message : 'unknown')
+      return {
+        statusCode: 503,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        body: JSON.stringify({ error: 'Usage service unavailable' }),
+      }
+    }
+    if (!allowed) {
       return {
         statusCode: 429,
         headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': '3600' },
-        body: JSON.stringify({ error: 'Rate limit exceeded — try again later' }),
+        body: JSON.stringify({ error: 'Rate limit exceeded; try again later' }),
       }
     }
-
-    supabase.from('api_usage').insert({ user_id: user.id, service: 'deepgram' })
-      .then(
-        () => {},
-        err => console.error('[deepgram-proxy] Failed to log API usage:', err),
-      )
   }
 
   const deepgramKey = process.env.DEEPGRAM_MANAGED_KEY
@@ -167,7 +169,7 @@ export const handler: Handler = async (event) => {
     }
   }
 
-  // Build Deepgram URL — whitelist allowed params
+  // Build the Deepgram URL from allowlisted parameters.
   const params = event.queryStringParameters ?? {}
   const rawMultiValue = event.multiValueQueryStringParameters ?? {}
   const model = ALLOWED_MODELS.includes(params.model ?? '') ? params.model! : 'nova-3'
@@ -180,7 +182,7 @@ export const handler: Handler = async (event) => {
   })
   if (params.numerals === 'true') qs.set('numerals', 'true')
 
-  // Keyword boost — matches the per-keyword shape Deepgram accepts. Capped at
+  // Keyword boost matches the per-keyword shape Deepgram accepts. Capped at
   // MAX_KEYWORDS entries and MAX_KEYWORD_LENGTH characters each so a caller
   // can't smuggle additional query parameters by stuffing huge strings.
   const rawKeywords = rawMultiValue.keywords
