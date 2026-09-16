@@ -350,9 +350,17 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
     let is_recording = Arc::clone(&state.is_recording);
 
     let dg_sender = Arc::clone(&state.dg_sender);
+    let capture_tap = Arc::clone(&state.capture_tap);
 
-    match crate::audio::build_input_stream(&device, &config, level, buffer, is_recording, dg_sender)
-    {
+    match crate::audio::build_input_stream(
+        &device,
+        &config,
+        level,
+        buffer,
+        is_recording,
+        dg_sender,
+        capture_tap,
+    ) {
         Ok(stream) => {
             if let Err(e) = stream.play() {
                 warn!("[audio] Failed to start stream: {e}");
@@ -1156,9 +1164,9 @@ pub fn voice_buffer_update_transcript(
 
 /// Re-transcribes a voice buffer recording through Deepgram.
 ///
-/// Decodes the OGG Opus file back to PCM, encodes as WAV, sends to Deepgram
-/// batch API, and returns the fresh transcript. The frontend is responsible
-/// for running Claude cleanup and calling `voice_buffer_update_transcript`.
+/// Uploads the stored OGG Opus (or WAV) file as-is to Deepgram's pre-recorded
+/// API and returns the fresh transcript. The frontend is responsible for
+/// running Claude cleanup and calling `voice_buffer_update_transcript`.
 #[tauri::command]
 pub async fn voice_buffer_reprocess(
     filename: String,
@@ -1168,36 +1176,7 @@ pub async fn voice_buffer_reprocess(
     let dir = lock_or_recover(&state.voice_buffer_dir).clone();
     let raw_bytes = crate::voice_buffer::get_audio(&dir, &filename)?;
 
-    // Decode OGG Opus → i16 PCM (or read WAV directly)
-    let (samples_i16, sample_rate, source_channels) = if filename.ends_with(".ogg") {
-        let cursor = std::io::Cursor::new(raw_bytes);
-        let (samples, _) = ogg_opus::decode::<_, 16000>(cursor)
-            .map_err(|e| format!("Failed to decode OGG Opus: {e}"))?;
-        (samples, 16_000u32, 1u16)
-    } else {
-        // WAV — parse header and extract i16 samples. Use try_into-or-error
-        // (no unwrap) so a malformed file fails cleanly instead of panicking.
-        if raw_bytes.len() < 44 {
-            return Err("WAV file too small".to_string());
-        }
-        let channels_bytes: [u8; 2] = raw_bytes[22..24]
-            .try_into()
-            .map_err(|_| "WAV header truncated (channels)".to_string())?;
-        let rate_bytes: [u8; 4] = raw_bytes[24..28]
-            .try_into()
-            .map_err(|_| "WAV header truncated (sample rate)".to_string())?;
-        let channels = u16::from_le_bytes(channels_bytes).max(1);
-        let sample_rate = u32::from_le_bytes(rate_bytes).max(1);
-        let samples: Vec<i16> = raw_bytes[44..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|chunk| i16::from_le_bytes(*chunk))
-            .collect();
-        (samples, sample_rate, channels)
-    };
-
-    if samples_i16.is_empty() {
+    if raw_bytes.is_empty() {
         return Ok(RecordingStopResponse {
             success: false,
             transcript: None,
@@ -1207,13 +1186,20 @@ pub async fn voice_buffer_reprocess(
         });
     }
 
-    // Convert i16 → f32 for WAV encoding
-    let samples_f32: Vec<f32> = samples_i16
-        .iter()
-        .map(|&s| s as f32 / i16::MAX as f32)
-        .collect();
-    let duration = samples_f32.len() as f64 / (sample_rate as f64 * source_channels as f64);
-    let wav = crate::audio::pcm_to_wav(&samples_f32, sample_rate, source_channels);
+    // Upload the stored file as-is. Deepgram demuxes OGG Opus (and WAV)
+    // natively, so there is no need to decode to PCM first. That mattered
+    // little for five-minute dictations, but an hour-long record-only session
+    // would balloon to hundreds of MB of WAV in memory and on the wire.
+    let content_type = if filename.ends_with(".ogg") {
+        "audio/ogg"
+    } else {
+        "audio/wav"
+    };
+    let duration = crate::voice_buffer::list_recordings(&dir)
+        .into_iter()
+        .find(|r| r.file == filename)
+        .map(|r| r.duration_secs)
+        .unwrap_or(0.0);
 
     // Send to Deepgram
     let keywords = lock_or_recover(&state.deepgram_keywords).clone();
@@ -1234,8 +1220,8 @@ pub async fn voice_buffer_reprocess(
     let resp = match client
         .post(&url)
         .header("Authorization", credential.header_value())
-        .header("Content-Type", "audio/wav")
-        .body(wav)
+        .header("Content-Type", content_type)
+        .body(raw_bytes)
         .send()
         .await
     {
@@ -1315,6 +1301,154 @@ pub fn voice_buffer_open_folder(state: State<AppState>) -> OkResponse {
     }
     crate::platform::open_in_file_manager(&dir);
     OkResponse::ok()
+}
+
+// ── Record-only sessions (unlimited length) ──────────────────────────────────
+
+/// Response for `voice_buffer_record_stop`.
+#[derive(serde::Serialize, Debug)]
+pub struct RecordStopResponse {
+    pub success: bool,
+    pub recording: Option<crate::voice_buffer::VoiceRecording>,
+    pub error: Option<String>,
+}
+
+/// Starts a "record only" session: audio is streamed straight to an OGG Opus
+/// file in the voice buffer directory with no length limit and no transcription.
+///
+/// Unlike `recording_start`, this does not touch `is_recording` or the
+/// in-memory `recording_buffer` (which is capped at five minutes). It installs
+/// a capture tap that the cpal callback feeds; a writer thread encodes and
+/// appends pages as audio arrives. Not gated on `voice_buffer_enabled`: that
+/// flag controls auto-saving dictations, whereas saving is the whole point of
+/// this mode. Needs no API key.
+#[tauri::command]
+pub fn voice_buffer_record_start(state: State<AppState>) -> OkResponse {
+    if lock_or_recover(&state.active_recording).is_some() {
+        return OkResponse::err("A recording is already in progress");
+    }
+    let dir = lock_or_recover(&state.voice_buffer_dir).clone();
+    if dir.as_os_str().is_empty() {
+        return OkResponse::err("Voice buffer directory not initialized");
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return OkResponse::err(format!("Failed to create voice buffer directory: {e}"));
+    }
+
+    let has_stream = lock_or_recover(&state.audio_stream).is_some();
+    if !has_stream {
+        debug!("[record] No audio stream running, starting one");
+        let res = audio_start(state.clone());
+        if !res.success {
+            return res;
+        }
+    }
+    let sample_rate = (*lock_or_recover(&state.audio_sample_rate)).max(1);
+    let channels = (*lock_or_recover(&state.audio_channels)).max(1);
+
+    let started_at = chrono::Local::now();
+    let filename = format!("{}.ogg", started_at.format("%Y-%m-%dT%H-%M-%S%.3f"));
+    let partial_path = dir.join(crate::recorder::partial_name(&filename));
+
+    // Create the file and encoder up front so a failure surfaces now, not at stop.
+    let writer =
+        match crate::recorder::OpusStreamWriter::create(&partial_path, sample_rate, channels) {
+            Ok(w) => w,
+            Err(e) => return OkResponse::err(e),
+        };
+    let (tx, rx) = std::sync::mpsc::sync_channel(crate::recorder::TAP_CAPACITY);
+    let worker = match crate::recorder::spawn_writer(writer, rx) {
+        Ok(handle) => handle,
+        Err(e) => {
+            let _ = std::fs::remove_file(&partial_path);
+            return OkResponse::err(e);
+        }
+    };
+
+    *lock_or_recover(&state.capture_tap) = Some(tx);
+    *lock_or_recover(&state.active_recording) = Some(crate::recorder::ActiveRecording {
+        filename: filename.clone(),
+        started_at,
+        worker,
+    });
+    debug!("[record] Started record-only session: {filename}");
+    OkResponse::ok()
+}
+
+/// Stops the record-only session, finalizes the OGG file, and registers it in
+/// the voice buffer manifest with an empty transcript.
+///
+/// Async so the (short) join on the writer thread runs on the blocking pool
+/// rather than the main thread. Sessions shorter than
+/// `recorder::MIN_RECORDING_SECS` are discarded as accidental double-taps.
+#[tauri::command]
+pub async fn voice_buffer_record_stop(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<RecordStopResponse, String> {
+    // Drop the tap first: the callback stops feeding the channel, the writer's
+    // receive loop ends, and it finalizes the file.
+    *lock_or_recover(&state.capture_tap) = None;
+    let Some(active) = lock_or_recover(&state.active_recording).take() else {
+        return Ok(RecordStopResponse {
+            success: false,
+            recording: None,
+            error: Some("No recording in progress".to_string()),
+        });
+    };
+    let dir = lock_or_recover(&state.voice_buffer_dir).clone();
+    let max_size = *lock_or_recover(&state.voice_buffer_max_size);
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let partial_path = active.partial_path(&dir);
+        let finished = match active.worker.join() {
+            Ok(Ok(finished)) => finished,
+            Ok(Err(e)) => {
+                let _ = std::fs::remove_file(&partial_path);
+                return Err(e);
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&partial_path);
+                return Err("Recording writer thread panicked".to_string());
+            }
+        };
+        if finished.duration_secs < crate::recorder::MIN_RECORDING_SECS {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err("Recording was too short to save".to_string());
+        }
+        let final_path = dir.join(&active.filename);
+        std::fs::rename(&partial_path, &final_path)
+            .map_err(|e| format!("Failed to finalize recording: {e}"))?;
+        crate::voice_buffer::register_recording(
+            &dir,
+            &active.filename,
+            active.started_at.to_rfc3339(),
+            finished.duration_secs,
+            finished.size_bytes,
+            Some(max_size),
+        )
+    })
+    .await
+    .map_err(|e| format!("Recording finalize task failed: {e}"))?;
+
+    match result {
+        Ok(recording) => {
+            let _ = app.emit("voice-buffer-updated", ());
+            Ok(RecordStopResponse {
+                success: true,
+                recording: Some(recording),
+                error: None,
+            })
+        }
+        Err(e) => {
+            warn!("[record] Stop failed: {e}");
+            Ok(RecordStopResponse {
+                success: false,
+                recording: None,
+                error: Some(e),
+            })
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

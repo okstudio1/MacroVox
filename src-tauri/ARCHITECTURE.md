@@ -39,6 +39,7 @@ src-tauri/
     ├── audio.rs        # cpal stream, WAV encoder, PCM→WS streaming
     ├── deepgram_ws.rs  # Deepgram WebSocket session + event emitter
     ├── voice_buffer.rs # Dictation history — OGG Opus buffer (downmix + resample to 16 kHz), manifest, eviction, startup repair pass
+    ├── recorder.rs     # Streaming OGG Opus writer for unlimited-length "record only" sessions + crash recovery reader
     ├── platform.rs     # Platform detection (OS, Wayland)
     └── commands.rs     # IPC command implementations + unit tests
 ```
@@ -138,6 +139,27 @@ Push events: `"theme-changed"` (string), `"settings-changed"` (object)
 | `voice_buffer_update_transcript(id, text)` | `voiceBufferUpdateTranscript(...)` | `OkResponse` |
 | `voice_buffer_reprocess(id, api_key)` | `voiceBufferReprocess(...)` | Reprocessed transcript |
 | `voice_buffer_open_folder` | `voiceBufferOpenFolder()` | `OkResponse` |
+| `voice_buffer_record_start` | `voiceBufferRecordStart()` | `OkResponse` |
+| `voice_buffer_record_stop` | `voiceBufferRecordStop()` | `RecordStopResponse { success, recording, error }` |
+
+**Record-only sessions (unlimited length).** `voice_buffer_record_start`
+installs a *capture tap* (`AppState::capture_tap`, a bounded `std::sync::mpsc`
+channel) that the cpal callback feeds independently of `is_recording`. A
+writer thread in `recorder.rs` downmixes, resamples to 16 kHz and Opus-encodes
+each frame, appending OGG pages to `<name>.ogg.partial` as audio arrives, so
+memory use stays flat however long the session runs (the five-minute
+`MAX_BUFFER_SAMPLES` cap applies only to the in-memory dictation buffer). Each
+finished page (about one second of audio) is flushed to disk.
+`voice_buffer_record_stop` drops the tap, joins the thread, renames the file
+and registers it in the manifest with an empty transcript; sessions under
+0.5 s are discarded as double-taps. At startup `recover_partial_recordings`
+adopts any `.partial` file left by a crash, reading its duration from the last
+complete page's granule position. Neither command is gated on
+`voice_buffer_enabled` (that flag only controls auto-saving dictations) and
+neither needs an API key. `voice_buffer_reprocess` uploads the stored OGG/WAV
+bytes to Deepgram as-is instead of decoding to WAV first, so transcribing an
+hour-long recording does not balloon memory. The startup repair pass skips
+entries longer than 300 s for the same reason.
 
 **Encoder rate normalization.** `encode_opus` always emits 16 kHz mono OGG Opus
 regardless of the capture device's native rate. Input samples are downmixed to
@@ -380,7 +402,7 @@ CSP pins to specific subdomains — no wildcards. `wasm-unsafe-eval` removed (no
 
 | Check | Location | Limit |
 |-------|----------|-------|
-| Recording buffer cap | `audio.rs` `process_audio_frame` | 5 min (4.8M samples) |
+| Recording buffer cap (dictation only; record-only sessions stream to disk) | `audio.rs` `process_audio_frame` | 5 min (4.8M samples) |
 | WebSocket channel bound | `deepgram_ws.rs` `start_session` | 500 messages (~5 s of audio) |
 | Keywords count/length | `commands.rs` `settings_broadcast` | 50 keywords, 100 chars each |
 | API key in error messages | `deepgram_ws.rs` | Generic "Invalid API key format" only |

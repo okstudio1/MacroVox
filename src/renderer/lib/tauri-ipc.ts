@@ -254,6 +254,29 @@ export const voiceBufferReprocess = (filename: string, credential: DeepgramCrede
 export const voiceBufferOpenFolder = (): Promise<OkResult> =>
   invoke('voice_buffer_open_folder')
 
+// ── Record-only sessions (unlimited length, no transcription) ────────────────
+
+export interface RecordStopResult {
+  success: boolean
+  recording?: VoiceRecording
+  error?: string
+}
+
+/**
+ * Starts streaming the microphone straight into an OGG Opus file in the voice
+ * buffer. No length cap and no Deepgram call; finish with `voiceBufferRecordStop`.
+ * Works without any API key.
+ */
+export const voiceBufferRecordStart = (): Promise<OkResult> =>
+  invoke('voice_buffer_record_start')
+
+/**
+ * Finalizes the record-only session and returns its new manifest entry (with an
+ * empty transcript). Sessions under half a second are discarded as double-taps.
+ */
+export const voiceBufferRecordStop = (): Promise<RecordStopResult> =>
+  invoke('voice_buffer_record_stop')
+
 // ── Events ────────────────────────────────────────────────────────────────────
 
 export const onQuickDictationStart = (callback: () => void): () => void =>

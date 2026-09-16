@@ -2,6 +2,7 @@ mod audio;
 mod commands;
 mod deepgram_ws;
 mod platform;
+mod recorder;
 mod state;
 mod voice_buffer;
 
@@ -66,6 +67,9 @@ pub fn run() {
                 // pre-fix encoder. Idempotent — files within 50ms of their
                 // expected duration are skipped.
                 std::thread::spawn(move || {
+                    // Adopt any `.partial` file left behind by a crash during a
+                    // record-only session before the repair pass runs.
+                    voice_buffer::recover_partial_recordings(&voice_dir);
                     voice_buffer::repair_stretched_recordings(&voice_dir);
                 });
             }
@@ -175,6 +179,9 @@ pub fn run() {
             voice_buffer_update_transcript,
             voice_buffer_reprocess,
             voice_buffer_open_folder,
+            // Record-only sessions (unlimited length)
+            voice_buffer_record_start,
+            voice_buffer_record_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MacroVox");

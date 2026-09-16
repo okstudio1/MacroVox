@@ -291,6 +291,108 @@ pub fn save_recording(
     Ok(filename)
 }
 
+/// Registers a file that is already on disk (written by the streaming
+/// recorder) in the manifest, evicting older recordings first if needed.
+///
+/// Returns the new manifest entry. The new file itself is never evicted here
+/// even if it alone exceeds the cap; the next save reclaims it.
+pub fn register_recording(
+    buffer_dir: &Path,
+    filename: &str,
+    timestamp: String,
+    duration_secs: f64,
+    size_bytes: u64,
+    max_size_bytes: Option<u64>,
+) -> Result<VoiceRecording, String> {
+    let mut manifest = load_manifest(buffer_dir);
+    if let Some(max) = max_size_bytes {
+        manifest.max_size_bytes = max;
+    }
+    evict_if_needed(buffer_dir, &mut manifest, size_bytes);
+
+    let entry = VoiceRecording {
+        file: filename.to_string(),
+        timestamp,
+        duration_secs,
+        size_bytes,
+        transcript: String::new(),
+    };
+    manifest.recordings.push(entry.clone());
+    manifest.current_size_bytes += size_bytes;
+    save_manifest(buffer_dir, &manifest)?;
+
+    debug!(
+        "[voice_buffer] Registered {} ({:.1}s, {} bytes, {}/{} MB used)",
+        filename,
+        duration_secs,
+        size_bytes,
+        manifest.current_size_bytes / (1024 * 1024),
+        manifest.max_size_bytes / (1024 * 1024),
+    );
+    Ok(entry)
+}
+
+/// Startup pass: adopts `.partial` files left behind when the app exited in
+/// the middle of a record-only session (crash, force quit). Completed OGG
+/// pages are still valid, so the file is renamed to its final name and
+/// registered with the duration read from the last page's granule position.
+/// Unreadable or sub-threshold leftovers are deleted.
+pub fn recover_partial_recordings(buffer_dir: &Path) {
+    let Ok(entries) = fs::read_dir(buffer_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(final_name) = name.strip_suffix(".partial") else {
+            continue;
+        };
+        if !final_name.ends_with(".ogg") {
+            continue;
+        }
+        match crate::recorder::partial_duration_secs(&path) {
+            Some(duration) if duration >= crate::recorder::MIN_RECORDING_SECS => {
+                let final_path = buffer_dir.join(final_name);
+                if let Err(e) = fs::rename(&path, &final_path) {
+                    warn!("[voice_buffer] Could not adopt partial recording {name}: {e}");
+                    continue;
+                }
+                let size = fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+                let timestamp = timestamp_from_filename(final_name)
+                    .unwrap_or_else(|| chrono::Local::now().to_rfc3339());
+                match register_recording(buffer_dir, final_name, timestamp, duration, size, None) {
+                    Ok(_) => debug!(
+                        "[voice_buffer] Recovered partial recording {final_name} ({duration:.1}s)"
+                    ),
+                    Err(e) => warn!(
+                        "[voice_buffer] Recovered {final_name} but manifest update failed: {e}"
+                    ),
+                }
+            }
+            _ => {
+                debug!("[voice_buffer] Discarding unusable partial recording {name}");
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// Parses the `%Y-%m-%dT%H-%M-%S%.3f` local timestamp that recording filenames
+/// are built from, returning it as RFC 3339.
+fn timestamp_from_filename(filename: &str) -> Option<String> {
+    use chrono::TimeZone;
+    let stem = filename
+        .strip_suffix(".ogg")
+        .or_else(|| filename.strip_suffix(".wav"))?;
+    let naive = chrono::NaiveDateTime::parse_from_str(stem, "%Y-%m-%dT%H-%M-%S%.3f").ok()?;
+    chrono::Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.to_rfc3339())
+}
+
 /// One-shot migration: re-encodes any recordings saved before the sample-rate
 /// fix so they play at real-time speed.
 ///
@@ -313,6 +415,13 @@ pub fn repair_stretched_recordings(buffer_dir: &Path) {
 
     for entry in manifest.recordings.iter_mut() {
         if !entry.file.ends_with(".ogg") {
+            new_total = new_total.saturating_add(entry.size_bytes);
+            continue;
+        }
+        // Anything longer than the old five-minute dictation cap came from the
+        // streaming recorder, which never had the stretch bug. Decoding an
+        // hour-long file on every launch just to confirm that is not worth it.
+        if entry.duration_secs > 300.0 {
             new_total = new_total.saturating_add(entry.size_bytes);
             continue;
         }
@@ -1030,5 +1139,122 @@ mod tests {
         assert_eq!(after.max_size_bytes, tight);
         assert_eq!(after.recordings.len(), 1, "shrinking cap must evict to fit");
         cleanup(&dir);
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "macrovox-vb-stream-test-{}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Writes `secs` of a quiet tone through the streaming recorder. With
+    /// `finish == false` the writer is dropped mid-session to mimic a crash.
+    fn write_session(path: &Path, secs: f64, finish: bool) -> u64 {
+        let mut w = crate::recorder::OpusStreamWriter::create(path, 16_000, 1).unwrap();
+        let n = (16_000.0 * secs) as usize;
+        let samples: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).sin() * 0.4).collect();
+        for chunk in samples.chunks(800) {
+            w.push(chunk).unwrap();
+        }
+        if finish {
+            w.finish().unwrap().size_bytes
+        } else {
+            drop(w);
+            fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn register_recording_adds_entry_with_empty_transcript_and_evicts() {
+        let dir = temp_dir();
+        let a = save_recording(&dir, &vec![0.1; 16_000], 16_000, 1, "first", None).unwrap();
+        let b = save_recording(&dir, &vec![0.1; 16_000], 16_000, 1, "second", None).unwrap();
+        let before = load_manifest(&dir);
+        let size_a = before.recordings[0].size_bytes;
+        let size_b = before.recordings[1].size_bytes;
+
+        let path = dir.join("long.ogg");
+        let size_new = write_session(&path, 3.0, true);
+        // Cap fits the new file plus the newer of the two old ones, not both.
+        let cap = size_new + size_b + size_a / 2;
+        let entry = register_recording(
+            &dir,
+            "long.ogg",
+            "2026-09-15T10:00:00+00:00".into(),
+            3.0,
+            size_new,
+            Some(cap),
+        )
+        .unwrap();
+
+        assert_eq!(entry.file, "long.ogg");
+        assert_eq!(entry.transcript, "");
+        assert_eq!(entry.size_bytes, size_new);
+        let after = load_manifest(&dir);
+        let names: Vec<&str> = after.recordings.iter().map(|r| r.file.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![b.as_str(), "long.ogg"],
+            "oldest evicted, new appended last"
+        );
+        assert!(!dir.join(&a).exists());
+        assert_eq!(after.current_size_bytes, size_b + size_new);
+        assert_eq!(after.max_size_bytes, cap);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_partial_adopts_playable_file_and_deletes_junk() {
+        let dir = temp_dir();
+        let good = dir.join("2026-09-15T10-00-00.000.ogg.partial");
+        write_session(&good, 2.4, false);
+        let junk = dir.join("2026-09-15T11-00-00.000.ogg.partial");
+        fs::write(&junk, b"not an ogg file").unwrap();
+        let tiny = dir.join("2026-09-15T12-00-00.000.ogg.partial");
+        write_session(&tiny, 0.2, false);
+
+        recover_partial_recordings(&dir);
+
+        assert!(
+            !good.exists() && !junk.exists() && !tiny.exists(),
+            "no partials left"
+        );
+        assert!(dir.join("2026-09-15T10-00-00.000.ogg").exists());
+        let manifest = load_manifest(&dir);
+        assert_eq!(manifest.recordings.len(), 1);
+        let rec = &manifest.recordings[0];
+        assert_eq!(rec.file, "2026-09-15T10-00-00.000.ogg");
+        assert_eq!(rec.transcript, "");
+        // Only the two completed one-second pages survived the "crash".
+        assert!(
+            (rec.duration_secs - 2.0).abs() < 0.05,
+            "duration {}",
+            rec.duration_secs
+        );
+        assert!(
+            rec.timestamp.starts_with("2026-09-15T10:00:00"),
+            "timestamp {}",
+            rec.timestamp
+        );
+        assert_eq!(manifest.current_size_bytes, rec.size_bytes);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_partial_ignores_missing_dir() {
+        recover_partial_recordings(Path::new("Z:/definitely/not/here"));
     }
 }
