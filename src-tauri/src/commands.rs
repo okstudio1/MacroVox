@@ -218,7 +218,10 @@ pub fn audio_list_devices(state: State<AppState>) -> AudioDevicesResponse {
     let host = cpal::default_host();
     let devices: Vec<String> = host
         .input_devices()
-        .map(|iter| iter.filter_map(|d| d.name().ok()).collect())
+        .map(|iter| {
+            iter.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     let devices = filter_device_list(devices);
     let selected = lock_or_recover(&state.selected_mic_device).clone();
@@ -322,7 +325,14 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
     let device = if let Some(ref name) = device_name {
         host.input_devices()
             .ok()
-            .and_then(|mut iter| iter.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
+            .and_then(|mut iter| {
+                iter.find(|d| {
+                    d.description()
+                        .ok()
+                        .map(|desc| desc.name() == name.as_str())
+                        .unwrap_or(false)
+                })
+            })
             .or_else(|| {
                 warn!(
                     "[audio] Device {:?} not found, falling back to default",
@@ -336,7 +346,13 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
 
     let device = match device {
         Some(d) => {
-            debug!("[audio] Using device: {:?}", d.name().unwrap_or_default());
+            debug!(
+                "[audio] Using device: {:?}",
+                d.description()
+                    .ok()
+                    .map(|desc| desc.name().to_string())
+                    .unwrap_or_default()
+            );
             d
         }
         None => {
@@ -350,7 +366,7 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
             debug!(
                 "[audio] Input config: {:?}ch @ {}Hz, format={:?}",
                 c.channels(),
-                c.sample_rate().0,
+                c.sample_rate(),
                 c.sample_format()
             );
             c
@@ -363,7 +379,7 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
     let t_config = t0.elapsed();
 
     // Persist stream parameters for WAV encoding in recording_stop.
-    *lock_or_recover(&state.audio_sample_rate) = config.sample_rate().0;
+    *lock_or_recover(&state.audio_sample_rate) = config.sample_rate();
     *lock_or_recover(&state.audio_channels) = config.channels();
 
     let capture = crate::audio::CaptureState {
@@ -391,7 +407,7 @@ pub fn audio_start(state: State<AppState>) -> OkResponse {
                 t_build.saturating_sub(t_config).as_millis(),
                 t_play.saturating_sub(t_build).as_millis(),
                 config.channels(),
-                config.sample_rate().0,
+                config.sample_rate(),
             );
             *lock_or_recover(&state.audio_stream) = Some(crate::state::AudioStream(stream));
             OkResponse::ok()

@@ -236,7 +236,7 @@ pub fn build_input_stream(
     } = state;
     let err_fn = |e| eprintln!("[MacroVox audio] stream error: {e}");
     let max_buffer_samples = recording_sample_limit(
-        config.sample_rate().0,
+        config.sample_rate(),
         config.channels(),
         MAX_RECORDING_DURATION_SECS,
     );
