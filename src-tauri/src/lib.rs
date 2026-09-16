@@ -70,6 +70,10 @@ pub fn run() {
                     // Adopt any `.partial` file left behind by a crash during a
                     // record-only session before the repair pass runs.
                     voice_buffer::recover_partial_recordings(&voice_dir);
+                    // Then reclaim finalized files that never reached the
+                    // manifest, which recovery cannot see and a clear cannot
+                    // retry.
+                    voice_buffer::remove_orphan_recordings(&voice_dir);
                     voice_buffer::repair_stretched_recordings(&voice_dir);
                 });
             }

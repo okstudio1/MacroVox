@@ -143,7 +143,15 @@ finished page (about one second of audio) is flushed to disk.
 and registers it in the manifest with an empty transcript; sessions under
 0.5 s are discarded as double-taps. At startup `recover_partial_recordings`
 adopts any `.partial` file left by a crash, reading its duration from the last
-complete page's granule position. Neither command is gated on
+complete page's granule position, and `remove_orphan_recordings` then deletes
+finalized `.ogg`/`.wav` files that no manifest entry refers to. A file reaches
+that state when it is renamed but never registered, which happens if the
+process dies in that window or if a mid-session Clear cannot delete it.
+Nothing else reclaims such a file: it is invisible to the UI, Clear only walks
+manifest entries, and it does not count against `max_size_bytes`. The sweep
+skips `.partial` files and anything modified in the last 60 seconds, so it
+cannot take a file that is still on its way into the manifest. Neither command
+is gated on
 `voice_buffer_enabled` (that flag only controls auto-saving dictations) and
 neither needs an API key. `voice_buffer_reprocess` uploads the stored OGG/WAV
 bytes to Deepgram as-is instead of decoding to WAV first, so transcribing an
@@ -223,7 +231,7 @@ Encoding and file work run in blocking tasks. A transaction mutex covers complet
 
 Each directory also has a history epoch. Stop captures it before waiting for transcription. Clear increments it while holding the transaction lock. A queued older save checks its captured epoch and is rejected after Clear, preventing an already stopped recording from reappearing later.
 
-Failed deletion does not remove the corresponding manifest entry. Clear and eviction preserve failures and return useful errors. The renderer keeps failed rows visible, refreshes list/storage information after partial clear, and allows deletion even when future history capture is disabled. Filenames are validated before filesystem access.
+Failed deletion does not remove the corresponding manifest entry. Clear and eviction preserve failures and return useful errors. A registration rejected for a stale epoch discards its own finalized file, and when that delete fails it says so in the error the renderer receives rather than leaking the audio silently; the startup orphan sweep is the durable retry. The renderer keeps failed rows visible, refreshes list/storage information after partial clear, and allows deletion even when future history capture is disabled. Filenames are validated before filesystem access.
 
 ## Renderer coordination
 

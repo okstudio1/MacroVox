@@ -22,11 +22,12 @@
 
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::time::Duration;
 
 static VOICE_BUFFER_TRANSACTION: Mutex<()> = Mutex::new(());
 static NEXT_RECORDING_ID: AtomicU64 = AtomicU64::new(1);
@@ -404,7 +405,17 @@ pub(crate) fn register_recording_at_epoch(
     // cannot interleave and lose this entry.
     let _transaction = transaction_lock();
     if history_epoch(buffer_dir) != expected_epoch {
-        let _ = fs::remove_file(buffer_dir.join(filename));
+        let stale = buffer_dir.join(filename);
+        if stale.exists() {
+            if let Err(error) = fs::remove_file(&stale) {
+                warn!("[voice_buffer] Could not discard {filename} after a clear: {error}");
+                return Err(format!(
+                    "Voice history was cleared before this recording could be saved, \
+                     and {filename} could not be deleted: {error}. It will be removed \
+                     on a later restart."
+                ));
+            }
+        }
         return Err("Voice history was cleared before this recording could be saved".to_string());
     }
     let mut manifest = load_manifest_unlocked(buffer_dir);
@@ -477,6 +488,75 @@ pub fn recover_partial_recordings(buffer_dir: &Path) {
             _ => {
                 debug!("[voice_buffer] Discarding unusable partial recording {name}");
                 let _ = fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// How long a finalized file must sit untouched before the orphan sweep will
+/// delete it. A record-only session renames its file to the final name a
+/// moment before it registers it, so anything newer than this could still be
+/// on its way into the manifest.
+const ORPHAN_MIN_AGE: Duration = Duration::from_secs(60);
+
+/// Startup pass: reclaims finalized audio files that no manifest entry refers
+/// to.
+///
+/// A file becomes an orphan when it reaches its final name but never lands in
+/// the manifest: the app was killed between the two, or the history was
+/// cleared mid-session and the discard in `register_recording_at_epoch` could
+/// not remove the file. An orphan is invisible to the UI, is never retried by
+/// `clear_all` (which only walks manifest entries), and does not count
+/// against `max_size_bytes`, so nothing else ever reclaims it. This is the
+/// durable retry for all of those paths.
+///
+/// `.partial` files are left to `recover_partial_recordings`, so the order of
+/// the two passes does not matter.
+pub fn remove_orphan_recordings(buffer_dir: &Path) {
+    let _transaction = transaction_lock();
+    let known: HashSet<String> = load_manifest_unlocked(buffer_dir)
+        .recordings
+        .into_iter()
+        .map(|recording| recording.file)
+        .collect();
+    let Ok(entries) = fs::read_dir(buffer_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".ogg") && !name.ends_with(".wav") {
+            continue;
+        }
+        if known.contains(name) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        // Keep anything too young to be certainly dead, and anything whose age
+        // cannot be read: a missed orphan is reclaimed at the next start,
+        // whereas a wrongly deleted recording is gone.
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= ORPHAN_MIN_AGE);
+        if !old_enough {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => debug!(
+                "[voice_buffer] Reclaimed orphaned recording {name} ({} bytes)",
+                metadata.len()
+            ),
+            Err(error) => {
+                warn!("[voice_buffer] Could not remove orphaned recording {name}: {error}")
             }
         }
     }
@@ -1380,6 +1460,42 @@ mod tests {
     }
 
     #[test]
+    fn register_after_clear_reports_a_discard_it_could_not_perform() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_epoch = history_epoch(&dir);
+        clear_all(&dir).unwrap();
+
+        // A directory cannot be removed by `remove_file` on any platform, so
+        // standing one where the finalized file goes forces the discard to
+        // fail the way a file held open by another process would.
+        let name = "2026-09-16T12-00-00.000.ogg";
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+
+        let error = register_recording_at_epoch(
+            &dir,
+            name,
+            "2026-09-16T12:00:00+01:00".to_string(),
+            12.0,
+            8,
+            None,
+            session_epoch,
+        )
+        .expect_err("stale session must not repopulate history");
+
+        assert!(
+            error.contains(name),
+            "the failure must name the file left behind: {error}"
+        );
+        assert!(dir.join(name).exists(), "the leftover is still on disk");
+        assert!(
+            load_manifest(&dir).recordings.is_empty(),
+            "history must stay cleared"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
     fn register_recording_still_works_without_an_intervening_clear() {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1516,5 +1632,59 @@ mod streaming_tests {
     #[test]
     fn recover_partial_ignores_missing_dir() {
         recover_partial_recordings(Path::new("Z:/definitely/not/here"));
+    }
+
+    /// Backdates `path` past `ORPHAN_MIN_AGE` so the sweep will consider it.
+    fn backdate(path: &Path) {
+        let old = std::time::SystemTime::now() - ORPHAN_MIN_AGE * 2;
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+    }
+
+    #[test]
+    fn orphan_sweep_reclaims_unreferenced_audio_only() {
+        let dir = temp_dir();
+        let registered = "2026-09-16T13-00-00.000.ogg";
+        let orphan = "2026-09-16T13-05-00.000.ogg";
+        let fresh_orphan = "2026-09-16T13-10-00.000.ogg";
+        let partial = "2026-09-16T13-15-00.000.ogg.partial";
+        for name in [registered, orphan, fresh_orphan, partial] {
+            fs::write(dir.join(name), b"audio").unwrap();
+        }
+        for name in [registered, orphan, partial] {
+            backdate(&dir.join(name));
+        }
+        let manifest = VoiceBufferManifest {
+            current_size_bytes: 5,
+            recordings: vec![VoiceRecording {
+                file: registered.to_string(),
+                timestamp: "2026-09-16T13:00:00Z".to_string(),
+                duration_secs: 1.0,
+                size_bytes: 5,
+                transcript: String::new(),
+            }],
+            ..Default::default()
+        };
+        save_manifest(&dir, &manifest).unwrap();
+
+        remove_orphan_recordings(&dir);
+
+        assert!(!dir.join(orphan).exists(), "aged orphan is reclaimed");
+        assert!(dir.join(registered).exists(), "manifest entries survive");
+        assert!(
+            dir.join(fresh_orphan).exists(),
+            "a file this new may still be on its way into the manifest"
+        );
+        assert!(dir.join(partial).exists(), "partials belong to recovery");
+        let after = load_manifest(&dir);
+        assert_eq!(after.recordings.len(), 1);
+        assert_eq!(after.recordings[0].file, registered);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_sweep_ignores_missing_dir() {
+        remove_orphan_recordings(Path::new("Z:/definitely/not/here"));
     }
 }
