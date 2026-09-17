@@ -62,7 +62,7 @@ Grab the latest signed installer from the releases repo:
 
 **[Download MacroVox for Windows](https://github.com/okstudio1/macrovox-releases/releases/latest)**
 
-Run `MacroVox_<version>_x64-setup.exe`, signed by OK Studio Inc. The `.msi` is available for managed deployment. Version 1.0.8 needs a manual installer upgrade: its updater was not mounted. The unreleased 1.0.9 source adds an update notice in the dictation window with an explicit install action. Windows reputation prompts can still vary by machine.
+Run `MacroVox_<version>_x64-setup.exe`, signed by OK Studio Inc. The `.msi` is available for managed deployment. Version 1.0.8 needs a manual installer upgrade: its updater was not mounted. 1.0.9 adds an update notice in the dictation window with an explicit install action, an Updates section in Settings for checking on demand, and a check that the downloaded installer carries our code-signing certificate before it runs. Windows reputation prompts can still vary by machine.
 
 ### Linux (beta)
 
@@ -181,7 +181,7 @@ To develop against your own provider accounts instead, just paste your keys unde
 
 ---
 
-## Security and reliability update (1.0.9, unreleased)
+## Security and reliability update (1.0.9)
 
 The fix branch addresses final-word truncation, stale cleanup, history races, and hosted billing/security findings. Source changes do not update the installed app or production services. Start with the [fix ledger and validation](docs/SECURITY_ARCHITECTURE_FIXES_2026-09-15.md), the [speech investigation](docs/DICTATION_CUTOFF_AND_LATENCY_REVIEW_2026-09-15.md), and the [backend migration runbook](docs/BACKEND_SECURITY_MIGRATION_2026-09-15.md). Managed speech uses short-lived grants; shared provider keys must be removed from client-readable storage and rotated during rollout.
 

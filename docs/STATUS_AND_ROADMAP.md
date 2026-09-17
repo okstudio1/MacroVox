@@ -6,15 +6,15 @@ Last source review: September 15, 2026. This file records repository state, not 
 
 | Area | Status |
 | --- | --- |
-| Published Windows application | 1.0.8, manual upgrade required for the next release |
-| Fix branch | 1.0.9 source, unreleased; managed Deepgram/Claude credential wiring is implemented (`deepgram-grant`, `claude-proxy`, `lib/deepgramCredential.ts`); see the fix ledger |
+| Published Windows application | 1.0.9 once published; 1.0.8 users must upgrade manually, since that build never mounted the updater |
+| Fix branch | Merged to `main` for 1.0.9; managed Deepgram/Claude credential wiring is implemented (`deepgram-grant`, `claude-proxy`, `lib/deepgramCredential.ts`); see the fix ledger. The Supabase migration must be applied before `deepgram-grant` is enabled |
 | Windows native runtime | Tauri 2, Rust cpal capture, streaming/batch Deepgram, optional AI cleanup |
 | Linux | Beta; native build and runtime verification required before shipping |
 | macOS | Planned |
 | Authentication | Supabase email/password; sessions persist in the webview profile |
 | BYOK | Deepgram and Anthropic keys supported independently of managed subscriptions |
 | Hosted billing and managed speech | Security migrations and endpoint changes prepared; staging and production rollout remain required |
-| Updates | Dictation-window notice and explicit install action added in 1.0.9 source; 1.0.8 updater was not mounted |
+| Updates | 1.0.9 adds the dictation-window notice, a Settings section with an on-demand check, and an Authenticode pin on the installer before it runs; 1.0.8 had no updater mounted at all |
 
 ## September security and dictation work
 
