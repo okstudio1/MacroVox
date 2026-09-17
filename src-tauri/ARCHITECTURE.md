@@ -1,6 +1,6 @@
 # Tauri backend architecture
 
-Updated September 15, 2026 for the unreleased 1.0.9 fix branch. The [fix ledger](../docs/SECURITY_ARCHITECTURE_FIXES_2026-09-15.md) records validation and outstanding release gates. Managed Deepgram grants are wired end to end (`deepgram-grant` -> `lib/deepgramCredential.ts` -> `deepgram_ws.rs`); BYOK remains the path that needs no sign-in.
+Updated September 16, 2026, covering 1.0.9 as published. The [fix ledger](../docs/SECURITY_ARCHITECTURE_FIXES_2026-09-15.md) records validation and outstanding release gates. Managed Deepgram grants are wired end to end (`deepgram-grant` -> `lib/deepgramCredential.ts` -> `deepgram_ws.rs`); BYOK remains the path that needs no sign-in.
 
 ## Runtime boundaries
 

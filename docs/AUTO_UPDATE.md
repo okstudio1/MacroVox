@@ -96,6 +96,13 @@ before verifying it.
 - 1.0.8 clients never mounted the updater, so they cannot be reached by this
   path at all and need a manual installer download. Do not count them as
   updatable.
+- 1.0.9 (published 2026-09-16) is the first build where any of this is live.
+  Its own installer was verified against every pin before publishing, and the
+  published binary was confirmed byte-identical to the artifact that was
+  checked. What remains unproven is the path itself: no client has yet fetched
+  a manifest, verified a payload and installed it. The 1.0.10 release is that
+  test, and a failure there would strand 1.0.9 clients on a manual reinstall,
+  so treat it as a release gate rather than an observation.
 
 ## Tests
 
