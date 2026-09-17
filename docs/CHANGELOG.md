@@ -1,6 +1,6 @@
 # MacroVox Changelog
 
-## Unreleased (1.0.9)
+## v1.0.9 : 2026-09-16
 
 ### September 16 maintenance, dependency majors, and a removal
 

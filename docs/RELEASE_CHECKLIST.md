@@ -60,7 +60,7 @@ On the EV-cert Windows host:
       `cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture real_signed_installer`.
       It prints the Authenticode status, thumbprint, subject and embedded `FileVersion` before asserting, so a failure names the pin that broke. Do not skip this: the pins ship inside a release but are only exercised when that release installs the *next* one, so a wrong pin strands every client on a manual reinstall. Pinned values live in `src-tauri/src/update_guard.rs`.
 - [ ] `npm run release:windows` copies all of the above into `release/windows/`
-- [ ] **Clean-VM smoke test** on a Windows 11 VM with no prior MacroVox install:
+- [ ] **Smoke test.** The clean-VM form of this step is **deliberately not performed** for 1.0.9 (decision recorded 2026-09-16). Run the checks below on a real install instead, accepting that a first run with no WebView2 runtime, no prior app data and no VC++ runtime stays unverified. Installing over an existing version is what every 1.0.8 user must do anyway, since that build never mounted the updater, so it is the representative path rather than a lesser one. Keep a previous installer to hand for rollback.
   - [ ] NSIS installer runs end-to-end without SmartScreen warnings
   - [ ] First-run sign-in (Supabase email/password) succeeds
   - [ ] Streaming transcription: press `Ctrl+Space`, speak, press it again : transcript appears, auto-paste fires into the previously focused window
