@@ -29,6 +29,21 @@ Closed as superseded: #24, #14, #13, #12, #11, #10, #9, #8, #7, #6, #5,
       (`supabase migration list`), the backup, and the Netlify env vars
       `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and `DEEPGRAM_MANAGED_KEY`.
 
+## Shipped
+
+1.0.9 was published on 2026-09-16: https://github.com/okstudio1/macrovox-releases/releases/tag/v1.0.9
+
+Verified before publishing: EV signature (`signtool verify /pa`, exit 0),
+minisign sidecars signed by key `9B91F23A49E0246D` matching the pubkey compiled
+into the app, all four Authenticode pins against the real installer
+(`FileVersion 1.0.9`), `latest.json` signature byte-identical to the `.exe.sig`,
+and the published download byte-identical to the signed local artifact.
+Confirmed by hand afterwards: upgrade over 1.0.8, dictation, auto-paste.
+
+Still open: apply `202609150001_backend_security_baseline.sql` in production.
+Until it lands, a Pro or Team user on 1.0.9 gets a 503 from `reserve_api_quota`
+and managed dictation fails.
+
 ## Verify on main before the release
 
 - [ ] **A real signed installer must pass the new Authenticode pins.** #37 made

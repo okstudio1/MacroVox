@@ -6,7 +6,7 @@ Last source review: September 15, 2026. This file records repository state, not 
 
 | Area | Status |
 | --- | --- |
-| Published Windows application | 1.0.9 once published; 1.0.8 users must upgrade manually, since that build never mounted the updater |
+| Published Windows application | 1.0.9, published 2026-09-16 ([release](https://github.com/okstudio1/macrovox-releases/releases/tag/v1.0.9)); 1.0.8 users must upgrade manually, since that build never mounted the updater |
 | Fix branch | Merged to `main` for 1.0.9; managed Deepgram/Claude credential wiring is implemented (`deepgram-grant`, `claude-proxy`, `lib/deepgramCredential.ts`); see the fix ledger. The Supabase migration must be applied before `deepgram-grant` is enabled |
 | Windows native runtime | Tauri 2, Rust cpal capture, streaming/batch Deepgram, optional AI cleanup |
 | Linux | Beta; native build and runtime verification required before shipping |
@@ -28,7 +28,7 @@ The current work covers final transcript ownership, consistent stop behavior, se
 - Deploy the backend and rotate previously distributed provider keys in the documented order. Never restore client-readable master keys as a rollback.
 - Build and sign Windows artifacts. Test the on-screen stop button immediately after the final word in streaming and batch modes using a real microphone.
 - Measure connection, finalization, provider response, and cleanup timing on the installed release. Synthetic tests cannot establish a real-world latency improvement.
-- Verify upgrade from 1.0.8 manually, then verify signed updates from a build with the updater mounted.
+- Upgrade from 1.0.8 and dictation with auto-paste were confirmed by hand on 1.0.9. The signed update path itself is still unexercised: 1.0.9 is the first build carrying the updater, so 1.0.10 is the first release that can prove the manifest fetch, signature verification, installer pinning, install and relaunch actually work together.
 - Complete the [release checklist](RELEASE_CHECKLIST.md), including installer and WebView CSP smoke tests.
 
 ## Remaining architecture work

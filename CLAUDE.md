@@ -57,7 +57,7 @@ BYOK secrets and Supabase sessions currently persist in the webview profile. OS 
 
 ## Release and documentation
 
-Version 1.0.9 is unreleased until signed artifacts are published. Keep package.json, tauri.conf.json, Cargo.toml, and their lockfiles synchronized. `check:versions` enforces app version parity and Tauri major/minor parity.
+Version 1.0.9 was published on 2026-09-16 to `okstudio1/macrovox-releases`: EV-signed installer and MSI, minisign sidecars, `latest.json`, and both SBOMs. It is the first build whose updater is live, so the 1.0.10 update is the first end-to-end exercise of the manifest fetch, minisign verification, installer pinning, install and relaunch. Keep package.json, tauri.conf.json, Cargo.toml, and their lockfiles synchronized. `check:versions` enforces app version parity and Tauri major/minor parity.
 
 Windows bundles are built and EV-signed on the signing host, then minisigned. Publishing is manual to the separate `okstudio1/macrovox-releases` repository. The tag workflow builds Linux artifacts; it does not publish a release. Read [docs/RELEASE.md](docs/RELEASE.md) and [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
