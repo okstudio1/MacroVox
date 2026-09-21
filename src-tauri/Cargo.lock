@@ -2416,7 +2416,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "log",
- "ogg",
+ "ogg 0.9.2",
  "ogg-opus",
  "reqwest",
  "serde",
@@ -2948,6 +2948,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ogg"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdab8dcd8d4052eaacaf8fb07a3ccd9a6e26efadb42878a413c68fc4af1dee2b"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "ogg-opus"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2955,7 +2964,7 @@ checksum = "d2868c43e32fd827c87108bb71c58e1716109bcef7e02ae5c85d025b3c136085"
 dependencies = [
  "audiopus",
  "byteorder",
- "ogg",
+ "ogg 0.8.0",
  "rand 0.8.6",
  "thiserror 1.0.69",
 ]
