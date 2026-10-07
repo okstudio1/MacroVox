@@ -7,6 +7,25 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    # Groups apply in order, so the Tauri group claims its packages before the
+    # catch-all. Majors match no group below and stay individual PRs.
+    groups:
+      # Tauri npm and cargo versions move in lockstep and are bumped together
+      # by hand (scripts/check-tauri-versions.mjs enforces parity), so the
+      # auto-merge job never merges a PR containing them.
+      tauri-npm:
+        patterns:
+          - "@tauri-apps/*"
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "javascript"
@@ -21,6 +40,22 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    groups:
+      # Same split as tauri-npm: Tauri crates are never auto-merged.
+      tauri-cargo:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+      cargo-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "rust"
@@ -68,6 +103,14 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+      github-actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "ci"
