@@ -1,22 +1,13 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
-import tailwindcss from 'tailwindcss'
-import autoprefixer from 'autoprefixer'
+import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   root: 'src/renderer',
   base: './',
   envDir: resolve(__dirname),
-  css: {
-    postcss: {
-      plugins: [
-        tailwindcss({ config: resolve(__dirname, 'tailwind.config.js') }),
-        autoprefixer(),
-      ],
-    },
-  },
   build: {
     outDir: '../../dist/renderer',
     emptyOutDir: true,

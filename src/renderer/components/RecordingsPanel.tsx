@@ -220,7 +220,7 @@ export function RecordingsPanel({
         <button
           onClick={onClose}
           aria-label="Close recordings"
-          className="flex items-center justify-center min-w-[40px] min-h-[40px] rounded hover:bg-white/10 transition-colors"
+          className="flex items-center justify-center min-w-[40px] min-h-[40px] rounded-sm hover:bg-white/10 transition-colors"
           style={{ color: 'var(--text-secondary)' }}
         >
           <X size={18} />
@@ -303,7 +303,7 @@ function RecordingRow({
     : 'Not transcribed yet'
   const canOpen = hasTranscript || canTranscribe
   const dateLabel = formatRecordingDate(rec.timestamp)
-  const actionBtn = 'flex flex-col items-center justify-center gap-0.5 min-h-[40px] flex-1 rounded hover:bg-white/10 transition-colors'
+  const actionBtn = 'flex flex-col items-center justify-center gap-0.5 min-h-[40px] flex-1 rounded-sm hover:bg-white/10 transition-colors'
   const actionBtnDisablable = `${actionBtn} disabled:opacity-50 disabled:hover:bg-transparent`
 
   return (
@@ -319,7 +319,7 @@ function RecordingRow({
       <button
         onClick={onOpen}
         disabled={!canOpen}
-        className="w-full text-left min-h-[44px] rounded px-1 py-1 hover:bg-white/5 transition-colors disabled:hover:bg-transparent disabled:cursor-default"
+        className="w-full text-left min-h-[44px] rounded-sm px-1 py-1 hover:bg-white/5 transition-colors disabled:hover:bg-transparent disabled:cursor-default"
       >
         <p className="text-xs flex items-center justify-between gap-2" style={{ color: 'var(--text-primary)' }}>
           <span>{dateLabel}</span>

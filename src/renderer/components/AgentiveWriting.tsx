@@ -125,7 +125,7 @@ export function AgentiveWriting({ user, canTranscribe }: Props) {
       {/* Error */}
       {error && (
         <div
-          className="text-xs px-2 py-1 rounded"
+          className="text-xs px-2 py-1 rounded-sm"
           style={{ color: 'var(--danger)', backgroundColor: 'var(--danger-bg)', border: '1px solid var(--danger)' }}
         >
           {error}
@@ -163,7 +163,7 @@ export function AgentiveWriting({ user, canTranscribe }: Props) {
               return (
                 <div
                   key={i}
-                  className="w-[2px] rounded-full transition-all duration-[60ms]"
+                  className="w-[2px] rounded-full transition-all duration-60"
                   style={{
                     backgroundColor: 'var(--danger)',
                     height:  `${2 + barLevel * 20}px`,
@@ -194,7 +194,7 @@ export function AgentiveWriting({ user, canTranscribe }: Props) {
         value={output}
         onChange={(e) => setOutput(e.target.value)}
         placeholder="Generated content appears here…"
-        className="flex-1 min-h-[100px] p-2 rounded text-sm resize-none focus:outline-none overflow-y-auto"
+        className="flex-1 min-h-[100px] p-2 rounded-sm text-sm resize-none focus:outline-hidden overflow-y-auto"
         style={{
           backgroundColor: 'var(--bg-secondary)',
           border: `1px solid ${isGenerating ? 'var(--accent-primary)' : 'var(--border-primary)'}`,

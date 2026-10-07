@@ -422,7 +422,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
             <Settings size={18} style={{ color: 'var(--accent-primary)' }} />
             <h2 className="text-lg font-semibold uppercase tracking-wider" style={{ color: 'var(--accent-primary)' }}>Settings</h2>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-red-900/30 rounded text-slate-500 hover:text-red-400">
+          <button onClick={onClose} className="p-1 hover:bg-red-900/30 rounded-sm text-slate-500 hover:text-red-400">
             <X size={20} />
           </button>
         </div>
@@ -462,7 +462,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 Account
               </h3>
               <div className="rounded-lg p-4" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
-                <div className="flex rounded overflow-hidden mb-4" style={{ border: '1px solid var(--border-primary)' }}>
+                <div className="flex rounded-sm overflow-hidden mb-4" style={{ border: '1px solid var(--border-primary)' }}>
                   {(['signin', 'signup'] as const).map(tab => (
                     <button
                       key={tab}
@@ -484,7 +484,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                     placeholder="Email"
                     value={authEmail}
                     onChange={e => setAuthEmail(e.target.value)}
-                    className="w-full px-3 py-2 rounded text-sm focus:outline-none"
+                    className="w-full px-3 py-2 rounded-sm text-sm focus:outline-hidden"
                     style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                   />
                   <input
@@ -493,7 +493,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                     value={authPassword}
                     onChange={e => setAuthPassword(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && handleEmailAuth()}
-                    className="w-full px-3 py-2 rounded text-sm focus:outline-none"
+                    className="w-full px-3 py-2 rounded-sm text-sm focus:outline-hidden"
                     style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                   />
                 </div>
@@ -504,7 +504,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 <button
                   onClick={handleEmailAuth}
                   disabled={authLoading || !authEmail || !authPassword}
-                  className="w-full mt-3 py-2 rounded text-white text-sm font-semibold tracking-wide flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="w-full mt-3 py-2 rounded-sm text-white text-sm font-semibold tracking-wide flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   style={{ backgroundColor: 'var(--accent-primary)' }}
                 >
                   {authLoading ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />}
@@ -564,12 +564,12 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                       placeholder="••••••••••••••••••••••••••••••••"
                       spellCheck={false}
                       autoComplete="off"
-                      className="flex-1 px-3 py-2 rounded text-sm font-mono focus:outline-none"
+                      className="flex-1 px-3 py-2 rounded-sm text-sm font-mono focus:outline-hidden"
                       style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                     />
                     <button
                       onClick={() => setShowDeepgramKey(v => !v)}
-                      className="p-2 rounded hover:bg-white/10"
+                      className="p-2 rounded-sm hover:bg-white/10"
                       style={{ color: 'var(--text-muted)' }}
                       title={showDeepgramKey ? 'Hide key' : 'Show key'}
                     >
@@ -591,12 +591,12 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                       placeholder="sk-ant-••••••••••••••••••••••••"
                       spellCheck={false}
                       autoComplete="off"
-                      className="flex-1 px-3 py-2 rounded text-sm font-mono focus:outline-none"
+                      className="flex-1 px-3 py-2 rounded-sm text-sm font-mono focus:outline-hidden"
                       style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                     />
                     <button
                       onClick={() => setShowAnthropicKey(v => !v)}
-                      className="p-2 rounded hover:bg-white/10"
+                      className="p-2 rounded-sm hover:bg-white/10"
                       style={{ color: 'var(--text-muted)' }}
                       title={showAnthropicKey ? 'Hide key' : 'Show key'}
                     >
@@ -607,7 +607,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 </div>
 
                 {(userDeepgramKey.trim() || userAnthropicKey.trim()) && (
-                  <p className="text-xs rounded px-3 py-2" style={{ color: 'var(--accent-hover)', backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
+                  <p className="text-xs rounded-sm px-3 py-2" style={{ color: 'var(--accent-hover)', backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
                     Saved. Your own key{userDeepgramKey.trim() && userAnthropicKey.trim() ? 's are' : ' is'} active — it takes effect on your next recording.
                   </p>
                 )}
@@ -696,7 +696,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 <select
                   value={autoCutoffSeconds}
                   onChange={(e) => handleAutoCutoffChange(e.target.value)}
-                  className="px-2 py-1 rounded text-sm focus:outline-none"
+                  className="px-2 py-1 rounded-sm text-sm focus:outline-hidden"
                   style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                 >
                   <option value="15">15 sec</option>
@@ -730,7 +730,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 <select
                   value={transcriptionMode}
                   onChange={(e) => { setTranscriptionMode(e.target.value); saveSetting('transcription_mode', e.target.value) }}
-                  className="px-2 py-1 rounded text-sm focus:outline-none"
+                  className="px-2 py-1 rounded-sm text-sm focus:outline-hidden"
                   style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                 >
                   <option value="batch">Batch</option>
@@ -761,7 +761,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                     setTranscriptionLanguage(e.target.value)
                     saveSetting('transcription_language', e.target.value)
                   }}
-                  className="w-full px-3 py-2 rounded text-sm focus:outline-none"
+                  className="w-full px-3 py-2 rounded-sm text-sm focus:outline-hidden"
                   style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                 >
                   {[
@@ -799,7 +799,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                   onChange={(e) => handleKeywordBoostsChange(e.target.value)}
                   placeholder={'MacroVox\nOAuth\nrefactor\nyour-custom-term'}
                   rows={3}
-                  className="w-full px-3 py-2 rounded text-sm focus:outline-none resize-none font-mono"
+                  className="w-full px-3 py-2 rounded-sm text-sm focus:outline-hidden resize-none font-mono"
                   style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                 />
               </div>
@@ -843,7 +843,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                         setNumberFormat(opt.value)
                         saveSetting('number_format', opt.value)
                       }}
-                      className="px-3 py-1.5 rounded text-xs font-medium transition-colors"
+                      className="px-3 py-1.5 rounded-sm text-xs font-medium transition-colors"
                       style={{
                         backgroundColor: numberFormat === opt.value ? 'var(--accent-primary)' : 'var(--bg-primary)',
                         color: numberFormat === opt.value ? 'white' : 'var(--text-secondary)',
@@ -868,7 +868,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                   onChange={(e) => { setPostProcessingContext(e.target.value); saveSetting('post_processing_context', e.target.value) }}
                   placeholder={"e.g. I have a speech impediment that affects 'r' and 'l' sounds."}
                   rows={3}
-                  className="w-full px-3 py-2 rounded text-sm focus:outline-none resize-none"
+                  className="w-full px-3 py-2 rounded-sm text-sm focus:outline-hidden resize-none"
                   style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                 />
               </div>
@@ -945,7 +945,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                         })
                       }}
                       onBlur={() => setIsCapturingHotkey(false)}
-                      className="flex-1 px-3 py-2 rounded text-sm text-center animate-pulse"
+                      className="flex-1 px-3 py-2 rounded-sm text-sm text-center animate-pulse"
                       style={{
                         backgroundColor: 'var(--bg-primary)',
                         border: '2px solid var(--accent-primary)',
@@ -958,14 +958,14 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                   ) : (
                     <>
                       <span
-                        className="flex-1 px-3 py-2 rounded text-sm font-mono"
+                        className="flex-1 px-3 py-2 rounded-sm text-sm font-mono"
                         style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                       >
                         {globalHotkey}
                       </span>
                       <button
                         onClick={() => { setIsCapturingHotkey(true); setHotkeyError(null) }}
-                        className="px-3 py-2 rounded text-xs font-medium transition-colors"
+                        className="px-3 py-2 rounded-sm text-xs font-medium transition-colors"
                         style={{ backgroundColor: 'var(--accent-primary)', color: 'white' }}
                       >
                         Change
@@ -991,14 +991,14 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs text-slate-400">Microphone</label>
-                <button onClick={loadDevices} disabled={isLoading} className="p-1 rounded" style={{ color: 'var(--text-muted)' }} title="Refresh devices">
+                <button onClick={loadDevices} disabled={isLoading} className="p-1 rounded-sm" style={{ color: 'var(--text-muted)' }} title="Refresh devices">
                   <RefreshCw size={12} className={isLoading ? 'animate-spin' : ''} />
                 </button>
               </div>
               <select
                 value={selectedDevice || ''}
                 onChange={(e) => handleDeviceSelect(e.target.value)}
-                className="w-full px-3 py-2 rounded text-sm focus:outline-none"
+                className="w-full px-3 py-2 rounded-sm text-sm focus:outline-hidden"
                 style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
               >
                 <option value="">Auto-detect</option>
@@ -1047,7 +1047,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                         setVoiceBufferMaxSize(e.target.value)
                         saveSetting('voice_buffer_max_size', e.target.value)
                       }}
-                      className="w-full px-3 py-1.5 rounded text-sm focus:outline-none"
+                      className="w-full px-3 py-1.5 rounded-sm text-sm focus:outline-hidden"
                       style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
                     >
                       <option value={String(50 * 1024 * 1024)}>50 MB (~7 hr)</option>
@@ -1088,7 +1088,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => ipc.voiceBufferOpenFolder()}
-                          className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-white/10 transition-colors"
+                          className="flex items-center gap-1 text-xs px-2 py-1 rounded-sm hover:bg-white/10 transition-colors"
                           style={{ color: 'var(--text-secondary)' }}
                           title="Open storage folder"
                         >
@@ -1097,7 +1097,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                         {voiceBufferInfo.recording_count > 0 && (
                           <button
                             onClick={handleClearVoiceHistory}
-                            className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-red-900/40 transition-colors"
+                            className="flex items-center gap-1 text-xs px-2 py-1 rounded-sm hover:bg-red-900/40 transition-colors"
                             style={{ color: '#f87171' }}
                           >
                             <Trash2 size={12} /> Clear all
@@ -1113,7 +1113,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 <button
                   type="button"
                   onClick={handleClearVoiceHistory}
-                  className="flex items-center gap-1 text-xs px-2 py-1 rounded hover:bg-red-900/40 transition-colors"
+                  className="flex items-center gap-1 text-xs px-2 py-1 rounded-sm hover:bg-red-900/40 transition-colors"
                   style={{ color: '#f87171' }}
                 >
                   <Trash2 size={12} /> Delete retained recordings
@@ -1154,7 +1154,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                 <div className="rounded-lg p-3" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
                   <p className="text-sm mb-2" style={{ color: 'var(--text-primary)' }}>No Active Subscription</p>
                   <p className="text-xs text-slate-400 mb-3">Subscribe for unlimited dictation with AI cleanup and all features.</p>
-                  <button onClick={handleUpgrade} className="w-full py-2 text-white text-sm rounded flex items-center justify-center gap-2 font-medium tracking-wide" style={{ backgroundColor: 'var(--accent-primary)' }}>
+                  <button onClick={handleUpgrade} className="w-full py-2 text-white text-sm rounded-sm flex items-center justify-center gap-2 font-medium tracking-wide" style={{ backgroundColor: 'var(--accent-primary)' }}>
                     <Sparkles size={14} />
                     Subscribe — \$6.99/mo
                   </button>
@@ -1167,7 +1167,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
           {category === 'appearance' && (
           <section>
             <h3 className="text-sm font-semibold mb-3 uppercase tracking-wider" style={{ color: 'var(--accent-primary)' }}>About</h3>
-            <div className="rounded p-3 space-y-3" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
+            <div className="rounded-sm p-3 space-y-3" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
               <div>
                 <p className="text-sm font-semibold" style={{ color: 'var(--accent-primary)' }}>MacroVox</p>
                 <p className="text-xs text-slate-400 mt-0.5">Voice Dictation for Windows</p>
@@ -1176,7 +1176,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
               <div className="pt-2" style={{ borderTop: '1px solid var(--border-primary)' }}>
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-slate-400">Toggle Dictation</span>
-                  <kbd className="px-2 py-0.5 rounded font-mono" style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--accent-hover)' }}>{globalHotkey}</kbd>
+                  <kbd className="px-2 py-0.5 rounded-sm font-mono" style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--accent-hover)' }}>{globalHotkey}</kbd>
                 </div>
               </div>
             </div>
@@ -1189,7 +1189,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
               <RefreshCw size={14} />
               Updates
             </h3>
-            <div className="rounded p-3 space-y-3" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
+            <div className="rounded-sm p-3 space-y-3" style={{ backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-primary)' }}>
               <div className="flex items-center justify-between text-xs">
                 <span className="text-slate-400">Installed version</span>
                 <span className="font-mono" style={{ color: 'var(--accent-hover)' }}>{currentVersion ?? 'unknown'}</span>
@@ -1201,7 +1201,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
               <button
                 onClick={() => { void checkForUpdate() }}
                 disabled={updateChecking || updateDownloading}
-                className="w-full py-2 text-white text-sm rounded flex items-center justify-center gap-2 font-medium tracking-wide disabled:opacity-50"
+                className="w-full py-2 text-white text-sm rounded-sm flex items-center justify-center gap-2 font-medium tracking-wide disabled:opacity-50"
                 style={{ backgroundColor: 'var(--accent-primary)' }}
               >
                 <RefreshCw size={14} className={updateChecking ? 'animate-spin' : ''} />
@@ -1215,7 +1215,7 @@ export function SettingsPanel({ isOpen, onClose, user, isPopup = false }: Settin
                   <button
                     onClick={() => { void downloadAndInstall() }}
                     disabled={updateDownloading}
-                    className="w-full py-2 text-white text-sm rounded flex items-center justify-center gap-2 font-medium tracking-wide disabled:opacity-50"
+                    className="w-full py-2 text-white text-sm rounded-sm flex items-center justify-center gap-2 font-medium tracking-wide disabled:opacity-50"
                     style={{ backgroundColor: 'var(--accent-primary)' }}
                   >
                     <Download size={14} />
