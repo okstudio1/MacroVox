@@ -1,3 +1,11 @@
+# Dependabot auto-merge lives in this file, as the last job (auto-merge), on
+# purpose. This repository has no branch protection (the okstudio1 org is on
+# the free plan), so `gh pr merge --auto` cannot be used: with no required
+# checks GitHub merges immediately or refuses, it never waits. Instead the
+# job `needs:` every other job, so it only runs once all of CI is green, then
+# merges directly. Do not "fix" it to --auto or move it to its own workflow
+# unless required status checks are configured on main.
+
 name: CI
 
 on:
@@ -172,3 +180,48 @@ jobs:
       fail-on-vuln: true
       upload-sarif: false
 
+  # Squash-merges Dependabot's patch and minor updates and GitHub Actions bumps
+  # after every job above has passed. Never merged here: semver-major bumps, and
+  # any PR touching a Tauri package (npm @tauri-apps/*, crates tauri,
+  # tauri-build, tauri-plugin-*), which are bumped by hand in lockstep.
+  # update-type is the highest change in a grouped PR, and dependency-names is
+  # the whole list, so one major or one Tauri package holds back the group.
+  # No checkout: this job never runs the pull request's code.
+  auto-merge:
+    name: Dependabot auto-merge
+    needs:
+      - versions
+      - typescript
+      - rust
+      - python
+      - dependencies
+      - supabase
+      - database
+      - osv-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.actor == 'dependabot[bot]' &&
+      github.repository == 'okstudio1/MacroVox'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Read what Dependabot is updating
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge the update
+        if: >-
+          !contains(steps.metadata.outputs.dependency-names, 'tauri') &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+          steps.metadata.outputs.package-ecosystem == 'github_actions')
+        run: gh pr merge --squash --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
