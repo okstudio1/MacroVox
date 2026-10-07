@@ -96,7 +96,11 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - run: npm audit --audit-level=moderate
+      # --omit=dev while GHSA-vfj7-8cjw-p6xm (braces, no patch) sits in the
+      # Tailwind 3 dev tree; the OSV scan below still covers dev dependencies,
+      # with that one advisory listed in osv-scanner.toml. Drop --omit=dev once
+      # Tailwind 4 lands.
+      - run: npm audit --audit-level=moderate --omit=dev
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit --file src-tauri/Cargo.lock

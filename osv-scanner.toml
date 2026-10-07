@@ -69,3 +69,10 @@ reason = "unic-ucd-ident 0.9.0 is unmaintained. Reached through urlpattern 0.3 -
 id = "RUSTSEC-2026-0150"
 ignoreUntil = 2027-03-31
 reason = "audiopus_sys 0.1.8 is unmaintained. This is the only entry here that is our own choice rather than Tauri's: it comes from audiopus 0.2, which MacroVox depends on directly and ogg-opus also pulls in, for the Opus encoder behind voice-buffer recording. Revisit first, since replacing it is within our control."
+
+# ── npm dev tooling: build-time only, no patched release ─────────────────────
+
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+ignoreUntil = 2026-12-31
+reason = "braces <= 3.0.3, stack-exhaustion DoS on deeply nested patterns; no patched release exists. Dev dependency only: tailwindcss 3.4 -> chokidar / micromatch -> braces, run at build time on glob patterns from our own tailwind.config. Nothing user-supplied reaches it and it is not in the shipped app. Removed by the Tailwind 4 migration, which drops chokidar and micromatch; delete this entry and restore the full npm audit in ci.yml when that lands."
