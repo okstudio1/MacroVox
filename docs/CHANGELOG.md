@@ -1,5 +1,12 @@
 # MacroVox Changelog
 
+## Unreleased
+
+### Tailwind CSS 4
+
+- **The renderer moves from Tailwind CSS 3.4 to Tailwind CSS 4** through `@tailwindcss/vite`. `tailwind.config.js`, `postcss.config.js`, and `autoprefixer` are gone; Tailwind needs no configuration here. Renamed utilities: `rounded` to `rounded-sm`, `focus:outline-none` to `focus:outline-hidden`, `duration-[60ms]` and `duration-[40ms]` to `duration-60` and `duration-40`. `index.css` keeps the v3 default border color and button pointer cursor so the look is unchanged. The move also drops `braces` (GHSA-vfj7-8cjw-p6xm), which reached the tree only through Tailwind 3.
+- **macOS minimum is now 11.0.** `bundle.macOS.minimumSystemVersion` is set to `11.0` because Tailwind 4 needs Safari 16.4 or later, and Tauri renders with the system WKWebView. macOS 10.13 to 10.15 is no longer supported. No macOS build has shipped; Windows WebView2 and Linux webkit2gtk-4.1 are unaffected.
+
 ## v1.0.9 : 2026-09-16
 
 ### September 16 maintenance, dependency majors, and a removal

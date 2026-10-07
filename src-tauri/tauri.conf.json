@@ -64,6 +64,9 @@
       "icons/icon.png"
     ],
     "resources": [],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
     "windows": {
       "signCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../scripts/sign-windows.ps1 -Path %1",
       "nsis": {

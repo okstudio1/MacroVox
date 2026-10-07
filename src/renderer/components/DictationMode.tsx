@@ -728,7 +728,7 @@ export function DictationMode() {
           <button
             onClick={() => setRecordingsOpen(!showRecordings)}
             aria-pressed={showRecordings}
-            className="h-7 px-2 rounded flex items-center gap-1 text-[11px] hover:bg-white/10"
+            className="h-7 px-2 rounded-sm flex items-center gap-1 text-[11px] hover:bg-white/10"
             style={{ color: showRecordings ? 'var(--accent-primary)' : 'var(--text-muted)' }}
             title={showRecordings ? 'Hide recordings' : 'Show recordings'}
           >
@@ -737,7 +737,7 @@ export function DictationMode() {
           </button>
           <button
             onClick={() => ipc.openSettingsWindow()}
-            className="p-1 rounded hover:bg-white/10"
+            className="p-1 rounded-sm hover:bg-white/10"
             style={{ color: 'var(--text-muted)' }}
             title="Settings"
           >
@@ -745,7 +745,7 @@ export function DictationMode() {
           </button>
           <button
             onClick={() => getCurrentWindow().minimize()}
-            className="p-1 rounded hover:bg-white/10"
+            className="p-1 rounded-sm hover:bg-white/10"
             style={{ color: 'var(--text-muted)' }}
             title="Minimize"
           >
@@ -753,7 +753,7 @@ export function DictationMode() {
           </button>
           <button
             onClick={() => getCurrentWindow().close()}
-            className="p-1 rounded hover:bg-red-500/20"
+            className="p-1 rounded-sm hover:bg-red-500/20"
             style={{ color: 'var(--text-muted)' }}
             title="Close"
           >
@@ -803,7 +803,7 @@ export function DictationMode() {
       <div className="shrink-0 flex flex-col items-center justify-center gap-3 pt-1">
         {/* Error */}
         {error && (
-          <div className="text-xs px-3 py-1 rounded" style={{ color: 'var(--danger)', backgroundColor: 'var(--danger-bg)', border: '1px solid var(--danger)' }}>
+          <div className="text-xs px-3 py-1 rounded-sm" style={{ color: 'var(--danger)', backgroundColor: 'var(--danger-bg)', border: '1px solid var(--danger)' }}>
             {error}
           </div>
         )}
@@ -853,7 +853,7 @@ export function DictationMode() {
               return (
                 <div
                   key={i}
-                  className="w-[3px] rounded-full transition-all duration-[40ms]"
+                  className="w-[3px] rounded-full transition-all duration-40"
                   style={{
                     backgroundColor: amplified > 0.4
                       ? `hsl(${hue}, 92%, ${48 + barLevel * 18}%)`
@@ -909,7 +909,7 @@ export function DictationMode() {
           placeholder={hudMode === 'record'
             ? 'Transcribe a recording from the Recordings list to see its text here...'
             : 'Transcript appears here...'}
-          className="w-full flex-1 min-h-[60px] p-2 rounded text-sm resize-none focus:outline-none overflow-y-auto"
+          className="w-full flex-1 min-h-[60px] p-2 rounded-sm text-sm resize-none focus:outline-hidden overflow-y-auto"
           style={{ backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-primary)' }}
         />
         {interimTranscript && (

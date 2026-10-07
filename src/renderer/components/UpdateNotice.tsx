@@ -19,7 +19,7 @@ export function UpdateNotice() {
     <div
       role={error ? 'alert' : 'status'}
       aria-live="polite"
-      className="mb-2 flex items-center gap-2 rounded px-2 py-1 text-xs"
+      className="mb-2 flex items-center gap-2 rounded-sm px-2 py-1 text-xs"
       style={{
         color: error ? 'var(--danger)' : 'var(--text-primary)',
         backgroundColor: error ? 'var(--danger-bg)' : 'var(--bg-secondary)',
@@ -34,7 +34,7 @@ export function UpdateNotice() {
           type="button"
           onClick={() => checkForUpdate()}
           disabled={checking}
-          className="flex shrink-0 items-center gap-1 rounded px-2 py-1 disabled:opacity-50"
+          className="flex shrink-0 items-center gap-1 rounded-sm px-2 py-1 disabled:opacity-50"
           aria-label="Retry update check"
         >
           <RefreshCw size={12} className={checking ? 'animate-spin' : ''} /> Retry
@@ -44,7 +44,7 @@ export function UpdateNotice() {
           type="button"
           onClick={() => downloadAndInstall()}
           disabled={downloading}
-          className="flex shrink-0 items-center gap-1 rounded px-2 py-1 disabled:opacity-50"
+          className="flex shrink-0 items-center gap-1 rounded-sm px-2 py-1 disabled:opacity-50"
           aria-label="Install update and restart MacroVox"
         >
           <Download size={12} /> {downloading ? 'Installing...' : 'Install'}

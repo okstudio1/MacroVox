@@ -234,7 +234,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
         </span>
         <button
           onClick={() => setSortNewestFirst(prev => !prev)}
-          className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded hover:bg-white/10 transition-colors"
+          className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm hover:bg-white/10 transition-colors"
           style={{ color: 'var(--text-secondary)' }}
           title={sortNewestFirst ? 'Showing newest first' : 'Showing oldest first'}
         >
@@ -248,7 +248,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
           <div
             key={rec.file}
             onContextMenu={(e) => handleContextMenu(e, rec.file)}
-            className="rounded text-xs cursor-default"
+            className="rounded-sm text-xs cursor-default"
             style={{
               backgroundColor: expandedFile === rec.file
                 ? 'var(--accent-primary-10, rgba(103,232,249,0.08))'
@@ -261,7 +261,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
               {/* Play/Stop button */}
               <button
                 onClick={() => handlePlay(rec.file)}
-                className="shrink-0 p-1 rounded hover:bg-white/10 transition-colors"
+                className="shrink-0 p-1 rounded-sm hover:bg-white/10 transition-colors"
                 style={{ color: playingFile === rec.file ? 'var(--accent-primary)' : 'var(--text-secondary)' }}
                 title={playingFile === rec.file ? 'Stop' : 'Play'}
               >
@@ -305,7 +305,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
                 <div className="flex items-center gap-1 pt-1">
                   <button
                     onClick={() => handleCopyTranscript(rec.file)}
-                    className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded hover:bg-white/10 transition-colors"
+                    className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm hover:bg-white/10 transition-colors"
                     style={{ color: copiedFile === rec.file ? 'var(--accent-primary)' : 'var(--text-muted)' }}
                   >
                     {copiedFile === rec.file ? <Check size={10} /> : <Copy size={10} />}
@@ -315,7 +315,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
                     <button
                       onClick={() => handleReprocess(rec.file)}
                       disabled={reprocessingFile === rec.file}
-                      className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded hover:bg-white/10 transition-colors disabled:opacity-50"
+                      className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm hover:bg-white/10 transition-colors disabled:opacity-50"
                       style={{ color: 'var(--accent-primary)' }}
                     >
                       <Sparkles size={10} />
@@ -324,7 +324,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
                   )}
                   <button
                     onClick={() => handleDelete(rec.file)}
-                    className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded hover:bg-red-900/40 transition-colors ml-auto"
+                    className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm hover:bg-red-900/40 transition-colors ml-auto"
                     style={{ color: '#f87171' }}
                   >
                     <Trash2 size={10} />
@@ -341,7 +341,7 @@ export function VoiceHistory({ user }: VoiceHistoryProps) {
       {contextMenu && (
         <div
           ref={menuRef}
-          className="fixed z-[100] py-1 rounded-lg shadow-xl min-w-[160px]"
+          className="fixed z-100 py-1 rounded-lg shadow-xl min-w-[160px]"
           style={{
             left: contextMenu.x,
             top: contextMenu.y,
