@@ -33,7 +33,7 @@ export function AgentiveWriting({ user, canTranscribe }: Props) {
   const [copied, setCopied]           = useState(false)
   const [error, setError]             = useState<string | null>(null)
   const [audioLevel, setAudioLevel]   = useState(0)
-  const audioLevelIntervalRef         = useRef<NodeJS.Timeout | null>(null)
+  const audioLevelIntervalRef         = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const { generate, isGenerating } = useAgentiveWriting({
     useProxy: !!user,
