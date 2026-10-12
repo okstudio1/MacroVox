@@ -160,7 +160,7 @@ fn downmix_into(samples: &[f32], channels: u16, out: &mut Vec<f32>) {
 
 /// Incremental OGG Opus file writer: 16 kHz mono, 24 kbps, 20 ms frames.
 pub struct OpusStreamWriter {
-    writer: PacketWriter<BufWriter<File>>,
+    writer: PacketWriter<'static, BufWriter<File>>,
     encoder: Encoder,
     serial: u32,
     channels_in: u16,
@@ -214,12 +214,7 @@ impl OpusStreamWriter {
         head.extend_from_slice(&0i16.to_le_bytes()); // output gain
         head.push(0); // channel mapping family
         writer
-            .write_packet(
-                head.into_boxed_slice(),
-                serial,
-                PacketWriteEndInfo::EndPage,
-                0,
-            )
+            .write_packet(head, serial, PacketWriteEndInfo::EndPage, 0)
             .map_err(io_err)?;
 
         // OpusTags (section 5.2): vendor string, zero user comments.
@@ -230,12 +225,7 @@ impl OpusStreamWriter {
         tags.extend_from_slice(vendor);
         tags.extend_from_slice(&0u32.to_le_bytes());
         writer
-            .write_packet(
-                tags.into_boxed_slice(),
-                serial,
-                PacketWriteEndInfo::EndPage,
-                0,
-            )
+            .write_packet(tags, serial, PacketWriteEndInfo::EndPage, 0)
             .map_err(io_err)?;
 
         let mut pending = Vec::with_capacity(FRAME_SAMPLES * 8);
@@ -306,7 +296,7 @@ impl OpusStreamWriter {
                 PacketWriteEndInfo::NormalPacket
             };
             self.writer
-                .write_packet(prev, self.serial, info, prev_granule)
+                .write_packet(prev.into_vec(), self.serial, info, prev_granule)
                 .map_err(io_err)?;
             if ends_page {
                 self.writer.inner_mut().flush().map_err(io_err)?;
@@ -330,7 +320,7 @@ impl OpusStreamWriter {
         if let Some((last, _)) = self.held.take() {
             self.writer
                 .write_packet(
-                    last,
+                    last.into_vec(),
                     self.serial,
                     PacketWriteEndInfo::EndStream,
                     end_granule,
