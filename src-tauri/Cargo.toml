@@ -43,7 +43,7 @@ enigo = "0.6"
 
 # Voice buffer: timestamps, base64 for playback, Opus compression
 chrono = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 ogg-opus = "0.1"
 # Streaming OGG Opus writer for unlimited-length "record only" sessions (same
 # crates ogg-opus already pulls in, used directly so pages can be written as
