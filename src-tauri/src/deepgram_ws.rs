@@ -35,6 +35,17 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
+
+/// How long the worker waits for `CloseStream` to go out once a stop is requested.
+pub const CLOSE_STREAM_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the worker then waits for Deepgram's final results and metadata.
+pub const FINAL_RESULT_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long `deepgram_stop` waits for the worker's stop result.  It must
+/// outlast the worker's own worst case (`CLOSE_STREAM_SEND_TIMEOUT` plus
+/// `FINAL_RESULT_TIMEOUT`), or a slow but healthy close is reported as a
+/// timeout with an empty transcript, and the final fragments the worker
+/// already assembled are thrown away on the way to the renderer.
+pub const STOP_WORKER_BUDGET: Duration = Duration::from_secs(16);
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -307,7 +318,7 @@ pub async fn start_session(config: DeepgramSessionConfig<'_>) -> Result<DgSender
                             graceful = true;
                             completion = Some(done);
                             match tokio::time::timeout(
-                                Duration::from_secs(5),
+                                CLOSE_STREAM_SEND_TIMEOUT,
                                 ws_sink.send(Message::Text(
                                     r#"{"type":"CloseStream"}"#.to_string(),
                                 )),
@@ -326,7 +337,7 @@ pub async fn start_session(config: DeepgramSessionConfig<'_>) -> Result<DgSender
                             }
                             let result = drain_final_results(
                                 &mut ws_rx,
-                                Duration::from_secs(8),
+                                FINAL_RESULT_TIMEOUT,
                                 final_transcript,
                                 |transcript, is_final| {
                                     let _ = app.emit(
@@ -347,7 +358,7 @@ pub async fn start_session(config: DeepgramSessionConfig<'_>) -> Result<DgSender
                         None => {
                             graceful = true;
                             match tokio::time::timeout(
-                                Duration::from_secs(5),
+                                CLOSE_STREAM_SEND_TIMEOUT,
                                 ws_sink.send(Message::Text(
                                     r#"{"type":"CloseStream"}"#.to_string(),
                                 )),
@@ -366,7 +377,7 @@ pub async fn start_session(config: DeepgramSessionConfig<'_>) -> Result<DgSender
                             }
                             let result = drain_final_results(
                                 &mut ws_rx,
-                                Duration::from_secs(8),
+                                FINAL_RESULT_TIMEOUT,
                                 final_transcript,
                                 |transcript, is_final| {
                                     let _ = app.emit(
@@ -703,6 +714,15 @@ mod tests {
 
         assert_eq!(result.transcript, "already final");
         assert!(result.error.unwrap().contains("simulated socket failure"));
+    }
+
+    #[test]
+    fn the_stop_budget_outlasts_the_worker() {
+        // The command gives up on the worker after STOP_WORKER_BUDGET.  The
+        // worker may legitimately spend the close timeout and then the full
+        // drain timeout before answering, so the budget must cover both or a
+        // slow close loses the assembled transcript.
+        assert!(STOP_WORKER_BUDGET > CLOSE_STREAM_SEND_TIMEOUT + FINAL_RESULT_TIMEOUT);
     }
 
     #[test]

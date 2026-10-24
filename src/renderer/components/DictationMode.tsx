@@ -110,6 +110,13 @@ export function DictationMode() {
     localStorage.getItem('dictation_ai_cleanup') !== 'false'
   )
   const streamingTranscriptRef = useRef('')
+  // Final fragments Deepgram delivered for the current streaming session, in
+  // order.  The stop response owns the transcript; this is the fallback when
+  // that response cannot carry one (worker timed out, superseded, or the
+  // connection dropped), so words already shown are never dropped on the floor.
+  const sessionFinalsRef = useRef('')
+  const autoCopyOnStopRef = useRef(autoCopyOnStop)
+  autoCopyOnStopRef.current = autoCopyOnStop
 
   const { postProcess, isPostProcessing, cancelPostProcessing } = usePostProcessing({
     useProxy: !!user,
@@ -176,6 +183,9 @@ export function DictationMode() {
         streamingTranscriptRef.current = streamingTranscriptRef.current
           ? streamingTranscriptRef.current + ' ' + text
           : text
+        sessionFinalsRef.current = sessionFinalsRef.current
+          ? sessionFinalsRef.current + ' ' + text
+          : text
         transcriptRef.current = streamingTranscriptRef.current
         setTranscript(streamingTranscriptRef.current)
         setInterimTranscript('')
@@ -205,6 +215,18 @@ export function DictationMode() {
       if (audioLevelIntervalRef.current) {
         clearInterval(audioLevelIntervalRef.current)
         audioLevelIntervalRef.current = null
+      }
+      // The worker is gone, so no stop response will ever carry this
+      // session's words.  The finals it delivered are what was heard:
+      // commit them and copy, the same as a stop would.  No auto-paste,
+      // since the user did not stop; the clipboard is enough to recover.
+      const heard = sessionFinalsRef.current
+      sessionFinalsRef.current = ''
+      if (heard) {
+        const base = sessionBaseTranscriptRef.current
+        const rawText = base ? `${base} ${heard}` : heard
+        commitTranscript(rawText)
+        if (autoCopyOnStopRef.current) void copyTranscript(rawText)
       }
     })
     return () => { cleanupTranscript(); cleanupError() }
@@ -323,6 +345,7 @@ export function DictationMode() {
     }
     sessionBaseTranscriptRef.current = clearOnNewRecording ? '' : transcriptRef.current
     streamingTranscriptRef.current = ''
+    sessionFinalsRef.current = ''
 
     setIsPreparing(true)
     setAudioLevel(0)
@@ -438,7 +461,14 @@ export function DictationMode() {
       setInterimTranscript('')
       const stopResult = await ipc.stopDeepgram(stoppingSessionId)
       setIsProcessing(false)
-      const currentText = stopResult.transcript || ''
+      let currentText = stopResult.transcript || ''
+      if (!currentText && !stopResult.success && sessionFinalsRef.current) {
+        // The worker could not answer (timed out, superseded, or gone).  Its
+        // final fragments already reached us one by one, and they are the
+        // best transcript there is; the error below says it may be short.
+        currentText = sessionFinalsRef.current
+      }
+      sessionFinalsRef.current = ''
       if (!stopResult.success) {
         setError(stopResult.error
           ? `Transcript may be incomplete: ${stopResult.error}`
@@ -544,7 +574,9 @@ export function DictationMode() {
             .catch(() => { setError('AI cleanup failed') })
         }
       } else if (!result.success && result.error) {
-        setError(result.error)
+        setError(result.recordingSaved
+          ? `${result.error}. The audio is saved in Recordings; transcribe it from there.`
+          : result.error)
       }
     }
     } catch (stopError) {

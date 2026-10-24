@@ -339,6 +339,124 @@ describe('DictationMode stop lifecycle', () => {
     expect(harness.copyToClipboard).toHaveBeenCalledWith('partial words')
   })
 
+  it('falls back to the finals already shown when the streaming stop carries no transcript', async () => {
+    localStorage.setItem('transcription_mode', 'streaming')
+    harness.stopDeepgram.mockResolvedValue({
+      success: false,
+      sessionId: 7,
+      error: 'Timed out stopping Deepgram streaming worker',
+    })
+    render(<DictationMode />)
+    fireEvent.click(await readyRecordButton())
+    await screen.findByRole('button', { name: 'Stop' })
+    act(() => harness.transcriptListener?.({ transcript: 'first phrase', isFinal: true, sessionId: 7 }))
+    act(() => harness.transcriptListener?.({ transcript: 'second phrase', isFinal: true, sessionId: 7 }))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+
+    await screen.findByText('Transcript may be incomplete: Timed out stopping Deepgram streaming worker')
+    expect(harness.copyToClipboard).toHaveBeenCalledWith('first phrase second phrase')
+    const textarea = screen.getByPlaceholderText('Transcript appears here...')
+    expect((textarea as HTMLTextAreaElement).value).toBe('first phrase second phrase')
+  })
+
+  it('copies nothing when the streaming stop fails before any final arrived', async () => {
+    localStorage.setItem('transcription_mode', 'streaming')
+    harness.stopDeepgram.mockResolvedValue({
+      success: false,
+      sessionId: 7,
+      error: 'Timed out stopping Deepgram streaming worker',
+    })
+    render(<DictationMode />)
+    fireEvent.click(await readyRecordButton())
+    await screen.findByRole('button', { name: 'Stop' })
+    act(() => harness.transcriptListener?.({ transcript: 'only interim', isFinal: false, sessionId: 7 }))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+
+    // Nothing final was heard, so there is no transcript to call incomplete:
+    // the bare worker error shows, and an interim fragment is never copied.
+    await screen.findByText('Timed out stopping Deepgram streaming worker')
+    expect(harness.copyToClipboard).not.toHaveBeenCalled()
+    const textarea = screen.getByPlaceholderText('Transcript appears here...')
+    expect((textarea as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it('prefers the stop response transcript over the finals it saw', async () => {
+    localStorage.setItem('transcription_mode', 'streaming')
+    harness.stopDeepgram.mockResolvedValue({ success: true, transcript: 'authoritative words', sessionId: 7 })
+    render(<DictationMode />)
+    fireEvent.click(await readyRecordButton())
+    await screen.findByRole('button', { name: 'Stop' })
+    act(() => harness.transcriptListener?.({ transcript: 'authoritative', isFinal: true, sessionId: 7 }))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+
+    await waitFor(() => expect(harness.copyToClipboard).toHaveBeenCalledWith('authoritative words'))
+    expect(harness.copyToClipboard).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps and copies the finals already shown when the connection is lost mid-recording', async () => {
+    localStorage.setItem('transcription_mode', 'streaming')
+    localStorage.setItem('dictation_auto_paste', 'true')
+    render(<DictationMode />)
+    fireEvent.click(await readyRecordButton())
+    await screen.findByRole('button', { name: 'Stop' })
+    act(() => harness.transcriptListener?.({ transcript: 'words before the drop', isFinal: true, sessionId: 7 }))
+    act(() => harness.streamingErrorListener?.({ error: 'Connection lost; recording may be incomplete', sessionId: 7 }))
+
+    await screen.findByText('Connection lost; recording may be incomplete')
+    await waitFor(() => expect(harness.copyToClipboard).toHaveBeenCalledWith('words before the drop'))
+    const textarea = screen.getByPlaceholderText('Transcript appears here...')
+    expect((textarea as HTMLTextAreaElement).value).toBe('words before the drop')
+    expect(harness.autoPaste).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull()
+  })
+
+  it('does not copy on a lost connection when auto-copy is off', async () => {
+    localStorage.setItem('transcription_mode', 'streaming')
+    localStorage.setItem('dictation_auto_copy', 'false')
+    render(<DictationMode />)
+    fireEvent.click(await readyRecordButton())
+    await screen.findByRole('button', { name: 'Stop' })
+    act(() => harness.transcriptListener?.({ transcript: 'words before the drop', isFinal: true, sessionId: 7 }))
+    act(() => harness.streamingErrorListener?.({ error: 'Connection lost; recording may be incomplete', sessionId: 7 }))
+
+    await screen.findByText('Connection lost; recording may be incomplete')
+    const textarea = screen.getByPlaceholderText('Transcript appears here...')
+    await waitFor(() => expect((textarea as HTMLTextAreaElement).value).toBe('words before the drop'))
+    expect(harness.copyToClipboard).not.toHaveBeenCalled()
+  })
+
+  it('says where the audio went when a batch upload fails but the recording was kept', async () => {
+    localStorage.setItem('transcription_mode', 'batch')
+    harness.stopRecording.mockResolvedValue({
+      success: false,
+      error: 'Could not connect to Deepgram (network or TLS): tls handshake eof',
+      recordingSaved: true,
+    })
+    render(<DictationMode />)
+    fireEvent.click(await readyRecordButton())
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop' }))
+
+    await screen.findByText(
+      'Could not connect to Deepgram (network or TLS): tls handshake eof. The audio is saved in Recordings; transcribe it from there.',
+    )
+    expect(harness.copyToClipboard).not.toHaveBeenCalled()
+  })
+
+  it('shows a plain error when a batch upload fails and nothing was kept', async () => {
+    localStorage.setItem('transcription_mode', 'batch')
+    harness.stopRecording.mockResolvedValue({
+      success: false,
+      error: 'Deepgram did not respond in time',
+      recordingSaved: false,
+    })
+    render(<DictationMode />)
+    fireEvent.click(await readyRecordButton())
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop' }))
+
+    await screen.findByText('Deepgram did not respond in time')
+    expect(harness.copyToClipboard).not.toHaveBeenCalled()
+  })
+
   it('does not overwrite an edit made while streaming stop finalizes', async () => {
     localStorage.setItem('transcription_mode', 'streaming')
     let resolveStop: (value: { success: true; transcript: string; sessionId: number }) => void = () => {}

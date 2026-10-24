@@ -57,6 +57,8 @@ export interface RecordingStopResult {
   sessionId?: number
   limitReached?: boolean
   error?: string
+  /** Failed batch stop only: the audio was kept in Recordings, untranscribed. */
+  recordingSaved?: boolean
 }
 
 export interface TranscriptEvent {
