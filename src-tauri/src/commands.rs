@@ -199,6 +199,10 @@ pub struct RecordingStopResponse {
     pub session_id: Option<u64>,
     #[serde(rename = "limitReached", skip_serializing_if = "Option::is_none")]
     pub limit_reached: Option<bool>,
+    /// Set on a failed batch stop: whether the captured audio was kept in
+    /// voice history (untranscribed) so the user can transcribe it later.
+    #[serde(rename = "recordingSaved", skip_serializing_if = "Option::is_none")]
+    pub recording_saved: Option<bool>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -631,6 +635,7 @@ pub async fn deepgram_stop(
             error: Some("Streaming session is no longer active".to_string()),
             session_id: Some(active_session).filter(|id| *id != 0),
             limit_reached: None,
+            recording_saved: None,
         });
     }
     *lock_or_recover(&state.is_recording) = false;
@@ -669,6 +674,7 @@ pub async fn deepgram_stop(
             error: Some("Deepgram streaming worker is unavailable".to_string()),
             session_id: Some(active_session),
             limit_reached: Some(limit_reached),
+            recording_saved: None,
         });
     };
     let (completion, finished) = tokio::sync::oneshot::channel();
@@ -688,9 +694,10 @@ pub async fn deepgram_stop(
             error: Some("Deepgram streaming worker stopped unexpectedly".to_string()),
             session_id: Some(active_session),
             limit_reached: Some(limit_reached),
+            recording_saved: None,
         });
     }
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), finished)
+    let result = tokio::time::timeout(crate::deepgram_ws::STOP_WORKER_BUDGET, finished)
         .await
         .ok()
         .and_then(Result::ok)
@@ -731,6 +738,7 @@ pub async fn deepgram_stop(
         error: result.error,
         session_id: Some(active_session),
         limit_reached: Some(limit_reached),
+        recording_saved: None,
     })
 }
 
@@ -803,6 +811,7 @@ pub async fn recording_stop(
             error: Some("No audio was captured".to_string()),
             session_id: None,
             limit_reached: Some(limit_reached),
+            recording_saved: None,
         });
     }
 
@@ -829,29 +838,109 @@ pub async fn recording_stop(
         url.push_str(&format!("&keyterm={}", urlencoding::encode(kw)));
     }
 
-    let request_started = Instant::now();
-    let resp = match state
-        .http_client
-        .post(&url)
-        .header("Authorization", credential.header_value())
-        .header("Content-Type", "audio/wav")
-        .body(wav)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+    let outcome = transcribe_wav(&state.http_client, &url, &credential, wav).await;
+
+    let (transcript_text, confidence) = match outcome {
+        Ok(result) => result,
+        Err(error) => {
+            // The words are on disk or nowhere: the transcription failed, so
+            // keep the audio in voice history (untranscribed) when history is
+            // on, and tell the renderer whether that happened.  Waiting for
+            // the write here keeps the flag truthful; the user is already
+            // looking at an error, so 50-200 ms more does not matter.
+            let recording_saved = match voice_history {
+                Some((dir, max_size, history_epoch)) => {
+                    keep_untranscribed_audio(
+                        &app,
+                        dir,
+                        samples,
+                        safe_sample_rate,
+                        safe_channels,
+                        max_size,
+                        history_epoch,
+                    )
+                    .await
+                }
+                None => false,
+            };
             return Ok(RecordingStopResponse {
                 success: false,
                 transcript: None,
                 confidence: None,
                 duration: Some(duration),
-                error: Some(format!("Deepgram request failed: {e}")),
+                error: Some(error),
                 session_id: None,
                 limit_reached: Some(limit_reached),
-            })
+                recording_saved: Some(recording_saved),
+            });
         }
     };
+
+    // Auto-save to voice buffer in background — don't block the
+    // transcript response. Opus encoding + disk write can take 50-200ms
+    // and the user shouldn't wait for it.
+    //
+    // All state is captured into owned locals here so a concurrent
+    // settings_broadcast can't change voice_buffer_dir/max_size between
+    // this point and when the background thread actually writes.
+    if let Some((dir, max_size, history_epoch)) =
+        voice_history.filter(|_| !transcript_text.is_empty())
+    {
+        let transcript_clone = transcript_text.clone();
+        // Clone the AppHandle so the background thread can notify
+        // webviews. Without this, the settings window's recordings
+        // list stays frozen at whatever was on disk when its
+        // WebView2 first loaded, since batch mode never round-trips
+        // through the renderer's voice_buffer_save path.
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            match crate::voice_buffer::save_recording_at_epoch(
+                &dir,
+                &samples,
+                safe_sample_rate,
+                safe_channels,
+                &transcript_clone,
+                Some(max_size),
+                history_epoch,
+            ) {
+                Ok(_) => {
+                    let _ = app_handle.emit("voice-buffer-updated", ());
+                }
+                Err(e) => warn!("[voice_buffer] Auto-save failed: {e}"),
+            }
+        });
+    }
+
+    Ok(RecordingStopResponse {
+        success: true,
+        transcript: Some(transcript_text),
+        confidence,
+        duration: Some(duration),
+        error: None,
+        session_id: None,
+        limit_reached: Some(limit_reached),
+        recording_saved: None,
+    })
+}
+
+/// Uploads one WAV to Deepgram's pre-recorded endpoint and returns the first
+/// alternative's transcript and confidence.  Every failure is a message fit
+/// for the HUD (no URL, which carries the user's keyterms).
+async fn transcribe_wav(
+    client: &reqwest::Client,
+    url: &str,
+    credential: &DeepgramCredential,
+    wav: Vec<u8>,
+) -> Result<(String, Option<f64>), String> {
+    let request_started = Instant::now();
+    let resp = client
+        .post(url)
+        .header("Authorization", credential.header_value())
+        .header("Content-Type", "audio/wav")
+        .body(wav)
+        .send()
+        .await
+        .map_err(describe_request_error)?;
 
     let status = resp.status();
     debug!(
@@ -861,97 +950,88 @@ pub async fn recording_stop(
     );
     if !status.is_success() {
         warn!("[recording] Deepgram returned status {}", status);
-        return Ok(RecordingStopResponse {
-            success: false,
-            transcript: None,
-            confidence: None,
-            duration: Some(duration),
-            error: Some(format!("Deepgram error ({})", status)),
-            session_id: None,
-            limit_reached: Some(limit_reached),
-        });
+        return Err(format!("Deepgram error ({})", status));
     }
 
-    let json: serde_json::Value = match resp.json().await {
-        Ok(j) => j,
-        Err(e) => {
-            return Ok(RecordingStopResponse {
-                success: false,
-                transcript: None,
-                confidence: None,
-                duration: Some(duration),
-                error: Some(format!("Invalid Deepgram response: {e}")),
-                session_id: None,
-                limit_reached: Some(limit_reached),
-            });
-        }
-    };
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid Deepgram response: {}", e.without_url()))?;
 
     let alt = json
         .get("results")
         .and_then(|r| r.get("channels"))
         .and_then(|ch| ch.get(0))
         .and_then(|c| c.get("alternatives"))
-        .and_then(|a| a.get(0));
+        .and_then(|a| a.get(0))
+        .ok_or_else(|| "Unexpected Deepgram response structure".to_string())?;
+    let transcript = alt["transcript"].as_str().unwrap_or("").to_string();
+    Ok((transcript, alt["confidence"].as_f64()))
+}
 
-    match alt {
-        Some(alt) => {
-            let transcript_text = alt["transcript"].as_str().unwrap_or("").to_string();
+/// Turns a reqwest failure into the sentence the HUD shows.
+fn describe_request_error(error: reqwest::Error) -> String {
+    request_failure_message(
+        error.is_timeout(),
+        error.is_connect(),
+        &error.without_url().to_string(),
+    )
+}
 
-            // Auto-save to voice buffer in background — don't block the
-            // transcript response. Opus encoding + disk write can take 50-200ms
-            // and the user shouldn't wait for it.
-            //
-            // All state is captured into owned locals here so a concurrent
-            // settings_broadcast can't change voice_buffer_dir/max_size between
-            // this point and when the background thread actually writes.
-            if let Some((dir, max_size, history_epoch)) =
-                voice_history.filter(|_| !transcript_text.is_empty())
-            {
-                let transcript_clone = transcript_text.clone();
-                // Clone the AppHandle so the background thread can notify
-                // webviews. Without this, the settings window's recordings
-                // list stays frozen at whatever was on disk when its
-                // WebView2 first loaded, since batch mode never round-trips
-                // through the renderer's voice_buffer_save path.
-                let app_handle = app.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    match crate::voice_buffer::save_recording_at_epoch(
-                        &dir,
-                        &samples,
-                        safe_sample_rate,
-                        safe_channels,
-                        &transcript_clone,
-                        Some(max_size),
-                        history_epoch,
-                    ) {
-                        Ok(_) => {
-                            let _ = app_handle.emit("voice-buffer-updated", ());
-                        }
-                        Err(e) => warn!("[voice_buffer] Auto-save failed: {e}"),
-                    }
-                });
-            }
+/// The three ways an upload fails, in words a user can act on.  A connect
+/// failure covers DNS, TCP and the TLS handshake (where "SSL" errors live);
+/// `detail` is reqwest's own text with the URL already removed.
+fn request_failure_message(timed_out: bool, connect_failed: bool, detail: &str) -> String {
+    if timed_out {
+        "Deepgram did not respond in time".to_string()
+    } else if connect_failed {
+        format!("Could not connect to Deepgram (network or TLS): {detail}")
+    } else {
+        format!("Deepgram request failed: {detail}")
+    }
+}
 
-            Ok(RecordingStopResponse {
-                success: true,
-                transcript: Some(transcript_text),
-                confidence: alt["confidence"].as_f64(),
-                duration: Some(duration),
-                error: None,
-                session_id: None,
-                limit_reached: Some(limit_reached),
-            })
+/// Saves audio whose transcription failed into voice history with an empty
+/// transcript, so the Recordings list offers it for transcription later.
+/// Returns whether the save succeeded.  Nothing here raises: the caller is
+/// already reporting the transcription failure.
+async fn keep_untranscribed_audio(
+    app: &AppHandle,
+    dir: std::path::PathBuf,
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+    max_size: u64,
+    history_epoch: u64,
+) -> bool {
+    if samples.is_empty() {
+        return false;
+    }
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        crate::voice_buffer::save_recording_at_epoch(
+            &dir,
+            &samples,
+            sample_rate,
+            channels,
+            "",
+            Some(max_size),
+            history_epoch,
+        )
+    })
+    .await;
+    match saved {
+        Ok(Ok(_)) => {
+            let _ = app.emit("voice-buffer-updated", ());
+            true
         }
-        None => Ok(RecordingStopResponse {
-            success: false,
-            transcript: None,
-            confidence: None,
-            duration: Some(duration),
-            error: Some("Unexpected Deepgram response structure".to_string()),
-            session_id: None,
-            limit_reached: Some(limit_reached),
-        }),
+        Ok(Err(e)) => {
+            warn!("[voice_buffer] Could not keep untranscribed audio: {e}");
+            false
+        }
+        Err(e) => {
+            warn!("[voice_buffer] Untranscribed-audio save task failed: {e}");
+            false
+        }
     }
 }
 
@@ -1849,6 +1929,41 @@ mod tests {
         assert!(json.contains("\"transcript\":\"hello world\""), "{json}");
         assert!(json.contains("\"confidence\":0.99"), "{json}");
         assert!(json.contains("\"duration\":3.2"), "{json}");
+    }
+
+    #[test]
+    fn recording_stop_response_reports_whether_the_audio_was_kept() {
+        let r = RecordingStopResponse {
+            success: false,
+            error: Some("Deepgram did not respond in time".to_string()),
+            recording_saved: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"recordingSaved\":true"), "{json}");
+    }
+
+    #[test]
+    fn request_failure_message_names_a_timeout_without_the_raw_error() {
+        let msg = request_failure_message(true, false, "operation timed out");
+        assert_eq!(msg, "Deepgram did not respond in time");
+    }
+
+    #[test]
+    fn request_failure_message_calls_a_tls_failure_a_connection_problem() {
+        let msg =
+            request_failure_message(false, true, "error trying to connect: tls handshake eof");
+        assert!(
+            msg.starts_with("Could not connect to Deepgram (network or TLS)"),
+            "{msg}"
+        );
+        assert!(msg.contains("tls handshake eof"), "{msg}");
+    }
+
+    #[test]
+    fn request_failure_message_keeps_other_details() {
+        let msg = request_failure_message(false, false, "connection reset by peer");
+        assert_eq!(msg, "Deepgram request failed: connection reset by peer");
     }
 
     #[test]

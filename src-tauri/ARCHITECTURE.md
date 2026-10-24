@@ -29,7 +29,7 @@ Most simple mutations return `{ success, error? }`. A resolved promise is not pr
 
 Streaming start returns `sessionId`. Transcript and error events carry that same ID. Stop returns `success`, final `transcript`, `sessionId`, `duration`, optional `error`, and `limitReached`. An incomplete final result can retain useful text while returning an error; callers must show that limitation.
 
-The stop response is authoritative. The renderer must not depend on the relative delivery order of a final event and an invoke response. It also buffers a small number of session-specific startup errors until it knows which session the start response created.
+The stop response is authoritative. The renderer must not depend on the relative delivery order of a final event and an invoke response. When that response fails without a transcript (the worker timed out, was superseded, or the socket dropped), the renderer falls back to the final fragments it already received for that session, labels the result incomplete, and still copies it: words that were on screen are never discarded. Interim fragments never take part in that fallback. It also buffers a small number of session-specific startup errors until it knows which session the start response created.
 
 ## IPC surface
 
@@ -228,7 +228,9 @@ An async start lock serializes connection setup. A short lifecycle mutex makes o
 
 Dropping the CPAL stream releases microphone capture. Normal stop and connection failure clear capture state and level, and remove the sender only while the exiting session still owns them. A timeout invalidates only its own session. Workers check ownership before continuing, so a canceled worker cannot spend minutes draining a slow FIFO or disturb a replacement.
 
-The audio channel holds up to 1,000 messages, approximately ten seconds at ten-millisecond callback intervals. Backpressure is bounded and logged without audio or transcript contents. The connection has a 15-second timeout; individual socket writes are bounded. After CloseStream, final results are drained with a fixed eight-second deadline. Heartbeats or interim messages cannot reset that deadline. The command also bounds enqueue and completion waits.
+The audio channel holds up to 1,000 messages, approximately ten seconds at ten-millisecond callback intervals. Backpressure is bounded and logged without audio or transcript contents. The connection has a 15-second timeout; individual socket writes are bounded. After CloseStream, final results are drained with a fixed eight-second deadline (`FINAL_RESULT_TIMEOUT`). Heartbeats or interim messages cannot reset that deadline. The command also bounds enqueue and completion waits; the completion wait (`STOP_WORKER_BUDGET`) must exceed the close-send timeout plus the drain deadline, which a unit test pins, so a slow but healthy close is never reported as a timeout with an empty transcript.
+
+In batch mode a failed upload (network, TLS, HTTP status or malformed body) keeps the captured audio in voice history with an empty transcript when history is on, and the stop response says so through `recordingSaved`, so the Recordings list can transcribe it later. The error text names the failure class (timeout, connection, other) and never includes the request URL, which carries the user's keyterms.
 
 Deepgram CloseStream already flushes pending audio. Sending it and immediately closing the WebSocket loses the final words. The drain routine accepts delayed final messages and stops at provider completion or closure, with explicit timeout/protocol errors. See [Deepgram CloseStream](https://developers.deepgram.com/docs/close-stream).
 
